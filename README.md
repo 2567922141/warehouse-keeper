@@ -141,5 +141,3 @@ tools/                     开发期辅助脚本（RCON、客户端驱动、分�
 ## 许可证
 
 本项目采用 GNU General Public License v3.0 许可证，详见 [LICENSE](LICENSE)。
-
-版权所有 © 2026 2567922141。

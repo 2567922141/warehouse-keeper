@@ -146,6 +146,26 @@ public final class WarehouseIndex {
         return n;
     }
 
+    /**
+     * 删掉一条容器记录，并把它的贡献从汇总里减掉（<b>不会</b>重算整份 items）。
+     *
+     * <p>给「按需局部重扫」（{@link com.ds.warehouse.index.IndexRefresh}）用：轮询发现箱子被炸掉、
+     * 被 {@code setblock} 换掉时，就地删掉这一条即可。以前这里只能 {@code containers.remove(key)}
+     * 再整份 {@link #reaggregate()}，大仓库会因此每秒重算一遍。
+     *
+     * @return 真的删掉了才返回 true
+     */
+    public boolean removeContainer(String key) {
+        ContainerRecord old = containers.remove(key);
+        if (old == null) {
+            return false;
+        }
+        revision++;
+        deaggregate(old);
+        scannedContainers = containers.size();
+        return true;
+    }
+
     private static boolean insideAny(ContainerRecord rec, List<Region> regions) {
         for (Region r : regions) {
             if (Scanner.dimensionOf(r).equals(rec.dimension) && r.contains(rec.pos)) {

@@ -53,6 +53,8 @@ public final class IndexRefresh {
     private static final int MAX_POLL_PER_ROUND = 512;
     /** {@link #sigOf} 的「这个坐标现在不是容器」返回值（真指纹恰好等于它的概率可以忽略） */
     private static final long MISSING = -1L;
+    /** 增量更新跑这么多轮（约 1 分钟）就整份重算一次兜底，防止长期累积出小偏差 */
+    private static final int FULL_REAGG_ROUNDS = 60;
 
     /** 待局部重扫的仓库名（保持插入顺序，先进先出） */
     private static final Set<String> STALE = new LinkedHashSet<>();
@@ -62,6 +64,8 @@ public final class IndexRefresh {
     private static int pollCooldown = POLL_TICKS;
     /** 抽查游标：每轮从上次停下的地方接着走，避免总盯着前几只箱子 */
     private static int pollCursor;
+    /** 距上次整份重算过了多少轮（见 {@link #FULL_REAGG_ROUNDS}） */
+    private static int roundsSinceFullReagg;
     private static int replacedTotal;
     private static int rescanTotal;
 
@@ -244,24 +248,31 @@ public final class IndexRefresh {
         pollCursor = Math.floorMod(pollCursor + round, keys.size());
         // 幽灵容器：删掉以后这个 key 就不会出现在下一轮的遍历里，不会每 tick 反复删
         for (String key : dead) {
-            ContainerRecord rec = WarehouseMod.INDEX.containers.remove(key);
+            ContainerRecord rec = WarehouseMod.INDEX.containers.get(key);
             SIG.remove(key);
-            if (rec != null) {
-                ServerLevel level = Scanner.levelOf(server, rec.dimension);
-                if (level != null) {
-                    markRegionOf(level, rec.pos); // 让那片区域重扫一遍，把换了/没了的箱子找回来
-                }
+            if (rec == null) {
+                continue;
             }
+            ServerLevel level = Scanner.levelOf(server, rec.dimension);
+            if (level != null) {
+                markRegionOf(level, rec.pos); // 让那片区域重扫一遍，把换了/没了的箱子找回来
+            }
+            // 增量减少这条记录的贡献（removeContainer 内部会 deaggregate），不必整份重算
+            WarehouseMod.INDEX.removeContainer(key);
         }
         if (fresh.isEmpty() && dead.isEmpty()) {
             return;
         }
-        // accept() 只能加不能减，所以先把旧的删掉，最后整份重算一次汇总
+        // accept() 自己会把同坐标（以及双联箱搭档坐标）的旧记录先减掉再加新的，所以这里不必先删；
+        // 也不必像以前那样每次变化都整份 reaggregate() —— 那是大仓库每秒一次的尖峰来源。
         for (ContainerRecord rec : fresh) {
-            WarehouseMod.INDEX.containers.remove(WarehouseIndex.key(rec.dimension, rec.pos));
             WarehouseMod.INDEX.accept(rec);
         }
-        WarehouseMod.INDEX.reaggregate();
+        // 兜底：增量更新跑满 FULL_REAGG_ROUNDS 轮就整份重算一次，长期累积的小偏差会被抹平
+        if (++roundsSinceFullReagg >= FULL_REAGG_ROUNDS) {
+            roundsSinceFullReagg = 0;
+            WarehouseMod.INDEX.reaggregate();
+        }
         WebSnapshot.markDirty();
         replacedTotal += fresh.size();
     }

@@ -1084,6 +1084,11 @@ public final class Tasks {
         if (level == null) {
             return null;
         }
+        // chunk 没加载时直接返回记忆里的坐标：canonical() 内部走 partnerLoaded，会强载区块，
+        // 而归一化只是「顺手纠正老档案」的锦上添花，不值得为它把区块拉起来。
+        if (!level.isLoaded(home.pos())) {
+            return new Spot(home.dimension(), home.pos());
+        }
         BlockPos pos = Scanner.canonical(level, home.pos());
         if (!pos.equals(home.pos())) {
             Homes.remember(id, WarehouseIndex.key(home.dimension(), pos));
@@ -1370,8 +1375,11 @@ public final class Tasks {
             Spot home = homeOf(id);
             if (home != null && home.pos() != null) {
                 ServerLevel level = Scanner.levelOf(server, home.dimension());
-                // 「家」必须用归一化坐标：双联箱的另一半是同一个箱子，用镜像坐标会写错格子（A1-d）
-                BlockPos homePos = level == null ? home.pos() : Scanner.canonical(level, home.pos());
+                // 「家」必须用归一化坐标：双联箱的另一半是同一个箱子，用镜像坐标会写错格子（A1-d）。
+                // 但 chunk 没加载时不能调 canonical —— 它会强载区块（hasRoom 那边也会直接判 false）。
+                BlockPos homePos = level == null || !level.isLoaded(home.pos())
+                        ? home.pos()
+                        : Scanner.canonical(level, home.pos());
                 if (level != null && hasRoom(level, homePos, s)) {
                     Body.moveTo(server, botName, level,
                             homePos.getX() + 0.5, homePos.getY() + 1, homePos.getZ() + 0.5);
@@ -1386,7 +1394,7 @@ public final class Tasks {
                 ContainerRecord rec = parkInWarehouse(server, bot, botName, s, j.region);
                 if (rec != null) {
                     ServerLevel rl = Scanner.levelOf(server, rec.dimension);
-                    BlockPos rp = rl == null ? rec.pos : Scanner.canonical(rl, rec.pos);
+                    BlockPos rp = rl == null || !rl.isLoaded(rec.pos) ? rec.pos : Scanner.canonical(rl, rec.pos);
                     Homes.remember(id, WarehouseIndex.key(rec.dimension, rp));
                     j.touch(rec.dimension, rp);
                     j.dirty = true;

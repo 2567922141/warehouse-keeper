@@ -51,8 +51,6 @@ public final class Scanner {
     private static final long BUDGET_NANOS = 20_000_000L;
     /** 安全上限：一次扫描最长 2 分钟，防止超大区域把服务器拖住 */
     private static final long MAX_TOTAL_NANOS = 120_000_000_000L;
-    /** 安全上限：最多扫 16384 个区块（约 1024x1024 方块） */
-    private static final int MAX_CHUNKS = 16384;
     /** 安全上限：一次扫描最多强制加载 4096 个区块（约 256x256 方块） */
     private static final int MAX_FORCE_LOAD = 4096;
 
@@ -399,8 +397,6 @@ public final class Scanner {
         private int cz0;
         private int cx1;
         private int cz1;
-        private int chunksPlanned;
-
         private long scannedChunks;
         private long skippedChunks;
         private long scannedContainers;
@@ -446,7 +442,6 @@ public final class Scanner {
             cz1 = hi.getZ() >> 4;
             cx = cx0;
             cz = cz0;
-            chunksPlanned = (cx1 - cx0 + 1) * (cz1 - cz0 + 1);
         }
 
         void step() {

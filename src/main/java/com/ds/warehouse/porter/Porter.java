@@ -1075,8 +1075,12 @@ public final class Porter {
         o.state = "等下单人上线";
         waited++;
         if (waited > WAIT_TICKS) {
+            // 空手时别说「物品已放回仓库」——doTake 一开始就在等下单人上线，那会儿还什么都没取
+            boolean had = !carried.isEmpty();
             returnCarried(server);
-            finish(server, o, "下单玩家始终未上线，物品已放回仓库。", true);
+            finish(server, o, had
+                    ? "下单玩家始终未上线，本单已放弃；已取出的物品已放回仓库。"
+                    : "下单玩家始终未上线，本单已放弃。", true);
         }
     }
 

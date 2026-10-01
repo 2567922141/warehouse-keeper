@@ -1,0 +1,59 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	// Loom 会自动带上 Minecraft / Fabric 的仓库
+	// Modrinth Maven：只用于「开发期把 Iron Chests 拉进测试服务端」。
+	// 它不会进入最终发布的 jar，也不会成为对外声明的依赖 ——
+	// 用户整合包里那个 IronChests-2.0.8.jar 才是运行时的那一份。
+	maven {
+		name = "Modrinth"
+		url = "https://api.modrinth.com/maven"
+		content { includeGroup "maven.modrinth" }
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// 仅开发期运行（不会被打包、不会被声明为依赖）：
+	// 让 runServer 里也带上 Iron Chests，用来实测
+	// 「instanceof Container + getContainerSize()」这条兼容路径
+	// 对 126 格 / 12 格宽的大箱子是否成立。
+	runtimeOnly "maven.modrinth:cyberanner-ironchest:2.0.8"
+
+	// 同样只是开发期运行：Carpet 的 /player 能在无头服务器里造出假玩家，
+	// 这样就能实测「/warehouse region grow <名字>（扩到玩家所在位置）」
+	// 和「/warehouse region merge <名字>（并进 pos1~pos2）」这两条必须
+	// 有真实 ServerPlayer 才能跑的路径。也不进发布 jar。
+	runtimeOnly "maven.modrinth:carpet:26.2"
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+	it.options.encoding = 'UTF-8'
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}

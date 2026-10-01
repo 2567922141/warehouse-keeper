@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "warehouse-keeper",
+  "version": "${version}",
+  "name": "Warehouse Keeper",
+  "description": "仓库管理：区域扫描、物品索引与统计定位、索引持久化并在存档加载时自动刷新、游戏内可视化操作界面（默认按 B 打开）、搬运工取货、送达与入库（安装 Carpet 时提供可见的人形搬运工）。兼容 Iron Chests 等任意 Container 实现。全部指令以 /warehouse 开头。",
+  "authors": [
+    "DS"
+  ],
+  "license": "GPL-3.0-only",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.ds.warehouse.WarehouseMod"
+    ],
+    "client": [
+      "com.ds.warehouse.client.WarehouseClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "carpet": "*"
+  }
+}

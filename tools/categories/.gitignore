@@ -1,0 +1,6 @@
+# 生成的审计产物：脚本随时可重跑，不入库（避免仓库臃肿）
+*-out*.txt
+registry-*.txt
+diff-*.txt
+corpus-new.txt
+corpus-v4.txt

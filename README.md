@@ -137,11 +137,11 @@ tools/                     开发期辅助脚本（RCON、客户端驱动、分�
 - 中文物品名依赖客户端向服务端推送名称表；专用服务端在没有客户端连入时，指令输出中的物品名为英文。
 - 面板布局面向 720P 及以上分辨率设计，极窄窗口下部分区域会按可用空间降级或隐藏。
 - 容器界面右侧标签栏的形态会随窗口尺寸与容器尺寸自适应降级。
-- 
+
 ## 模组兼容性
-1.适配更多箱子（Iron Chests）
+- 1.适配更多箱子（Iron Chests）
     https://modrinth.com/mod/cyberanner-ironchest
-2.carpet
+- 2.carpet
     https://modrinth.com/mod/carpet
     
 ## 许可证

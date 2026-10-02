@@ -1,6 +1,7 @@
 package com.ds.warehouse.net;
 
 import com.ds.warehouse.WarehouseMod;
+import com.ds.warehouse.index.ContainerRecord;
 import com.ds.warehouse.index.IndexRefresh;
 import com.ds.warehouse.index.Scanner;
 import com.ds.warehouse.util.Admin;
@@ -12,11 +13,13 @@ import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.item.ItemStack;
 
 import java.nio.charset.StandardCharsets;
 import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -372,8 +375,26 @@ public final class ViewQueryService {
         if (d == null) {
             return Map.of("error", "索引中不存在该容器，可能刚重新扫描过，请刷新后重试。");
         }
+        // 逐格附魔 / 自定义名必须从 ItemStack 上读，而快照里的 SlotRow 只留了 id / 名字 / 数量，
+        // 所以按槽位再从索引记录里取一次 ItemStack。索引正好在这一刻被换掉时只退化成「无附魔 / 无自定义名」，
+        // 不影响 id、名字、数量这些从快照来的字段。
+        Map<Integer, ItemStack> stacks = new HashMap<>();
+        ContainerRecord rec = WarehouseMod.INDEX.containers.get(d.key);
+        if (rec != null) {
+            for (ContainerRecord.StoredStack ss : rec.contents) {
+                stacks.put(ss.slot(), ss.stack());
+            }
+        }
+        List<SlotDetail> rows = new ArrayList<>(d.items.size());
+        for (WebSnapshot.SlotRow r : d.items) {
+            ItemStack st = stacks.get(r.slot);
+            rows.add(new SlotDetail(r.slot, r.id, r.name,
+                    st == null ? "" : Scanner.customNameText(st),
+                    r.count, r.category,
+                    st == null ? "" : Scanner.enchantText(st)));
+        }
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("container", d);
+        out.put("container", new ContainerDetailBrief(d, rows));
         return out;
     }
 
@@ -413,5 +434,36 @@ public final class ViewQueryService {
 
     private record ContainerBrief(String key, String pos, String dimensionName, String blockName,
                                   int size, int used, boolean doubleChest, List<String> regions) {
+    }
+
+    /**
+     * 容器详情（对应网页 /api/container 与面板的「箱子 → 点一行 → 容器详情」）。
+     * 字段与 {@link WebSnapshot.ContainerDetail} 一一对应，只把 {@code items} 换成带附魔 / 自定义名的
+     * {@link SlotDetail} 列表。
+     */
+    private record ContainerDetailBrief(String key, String dimension, String dimensionName, String pos,
+                                        int x, int y, int z, String block, String blockName, int size,
+                                        int used, boolean doubleChest, List<String> regions,
+                                        long totalItems, List<SlotDetail> items) {
+        ContainerDetailBrief(WebSnapshot.ContainerDetail d, List<SlotDetail> items) {
+            this(d.key, d.dimension, d.dimensionName, d.pos, d.x, d.y, d.z, d.block, d.blockName,
+                    d.size, d.used, d.doubleChest, d.regions, d.totalItems, items);
+        }
+    }
+
+    /**
+     * 容器详情里的一格。
+     *
+     * <p>{@code ench}：这一格物品的附魔，形如 {@code minecraft:sharpness@5,minecraft:unbreaking@3}
+     * （注册名@等级，按注册名排序，用 {@code ,} 连接）；没有附魔时是空串。
+     *
+     * <p>{@code customName}：物品的自定义名原文（铁砧 / 命名牌改过的名字）；没有时是空串。
+     * 契约里这个字段叫 {@code name}，但 {@link WebSnapshot.SlotRow#name} 已经是「物品显示名」
+     * （客户端 {@code WarehouseScreen.queryItemName} 会拿它当本地名的回退），把 {@code name}
+     * 改成自定义名会让面板上的物品名在客户端查不到本地名时变成空串，所以这里保留
+     * {@code name} = 显示名，自定义名另给 {@code customName}。
+     */
+    private record SlotDetail(int slot, String id, String name, String customName, int count,
+                              String category, String ench) {
     }
 }

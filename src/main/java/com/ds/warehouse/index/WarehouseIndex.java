@@ -8,8 +8,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * 仓库索引：容器 → 物品 的双向聚合。
@@ -23,6 +27,16 @@ public final class WarehouseIndex {
     public final Map<String, ContainerRecord> containers = new LinkedHashMap<>();
     /** key = 物品 id */
     public final Map<String, ItemEntry> items = new LinkedHashMap<>();
+
+    /**
+     * 附魔索引：附魔注册名（含命名空间）→ (容器 key → 该附魔在这个容器里的最高等级)。
+     *
+     * <p>内层用 TreeMap，所以 {@link #enchantHits} 拿到的顺序天然按容器 key 排好。
+     * 条目由 {@link #addItemMeta} 写入，容器记录消失时由本类的各条删除路径同步清掉。
+     */
+    private final Map<String, Map<String, Integer>> enchants = new TreeMap<>();
+    /** 自定义名索引（名字已转小写）→ 出现过这个名字的容器 key；TreeSet 保证顺序稳定 */
+    private final Map<String, Set<String>> customNames = new TreeMap<>();
 
     // ---- 最近一次扫描的统计 ----
     public long scannedContainers;
@@ -59,6 +73,8 @@ public final class WarehouseIndex {
         revision++;
         containers.clear();
         items.clear();
+        enchants.clear();
+        customNames.clear();
         scannedContainers = 0;
         scannedChunks = 0;
         skippedChunks = 0;
@@ -81,12 +97,15 @@ public final class WarehouseIndex {
         revision++;
         if (rec.partner != null) {
             // 同一个物理箱子只许留一条记录：合并过的那条进来了，就把搭档坐标上的旧记录清掉
-            ContainerRecord ghost = containers.remove(key(rec.dimension, rec.partner));
+            String ghostKey = key(rec.dimension, rec.partner);
+            ContainerRecord ghost = containers.remove(ghostKey);
             if (ghost != null) {
                 deaggregate(ghost);
+                dropMeta(ghostKey);
             }
         }
-        ContainerRecord old = containers.put(key(rec.dimension, rec.pos), rec);
+        String ckey = key(rec.dimension, rec.pos);
+        ContainerRecord old = containers.put(ckey, rec);
         if (old == null) {
             scannedContainers++;
         } else {
@@ -94,6 +113,11 @@ public final class WarehouseIndex {
             // 否则物品总数会凭空翻倍。实测：2,101,2 同时在 roof 与 t1 里，全量扫描后 dirt 1664 → 3328。
             deaggregate(old);
         }
+        // 这一格的记录刚被换成新内容，附魔 / 自定义名索引必须跟着重算：
+        // IndexRefresh 轮询发现箱内物品变了时只会调 accept（不会另调 addItemMeta），
+        // 只加不减的话「把附魔书取走」之后索引里会一直留着那本书的附魔。
+        dropMeta(ckey);
+        rebuildMeta(rec);
         aggregate(rec);
     }
 
@@ -114,7 +138,9 @@ public final class WarehouseIndex {
             if (rec.partner == null) {
                 continue;
             }
-            if (containers.remove(key(rec.dimension, rec.partner)) != null) {
+            String ghostKey = key(rec.dimension, rec.partner);
+            if (containers.remove(ghostKey) != null) {
+                dropMeta(ghostKey);
                 n++;
             }
         }
@@ -142,9 +168,10 @@ public final class WarehouseIndex {
         int n = 0;
         Iterator<Map.Entry<String, ContainerRecord>> it = containers.entrySet().iterator();
         while (it.hasNext()) {
-            ContainerRecord rec = it.next().getValue();
-            if (insideAny(rec, regions)) {
+            Map.Entry<String, ContainerRecord> e = it.next();
+            if (insideAny(e.getValue(), regions)) {
                 it.remove();
+                dropMeta(e.getKey());
                 revision++;
                 n++;
             }
@@ -166,10 +193,116 @@ public final class WarehouseIndex {
         if (old == null) {
             return false;
         }
+        dropMeta(key);
         revision++;
         deaggregate(old);
         scannedContainers = containers.size();
         return true;
+    }
+
+    /**
+     * 记下一个容器里的附魔与自定义名（扫描时每个容器提交一次，别每格一次）。
+     *
+     * <p>同一个容器多次调用按「附魔取最大等级、自定义名取并集」合并，所以重叠区域扫两遍也不会把等级刷小。
+     * 容器记录被删掉时必须由调用方清掉这里的条目 —— 本类的 {@link #clear()} / {@link #accept} /
+     * {@link #removeContainer(String)} / {@link #removeContainersIn(List)} / {@link #dropGhostRecords()}
+     * / {@link #removeContainersOutside(Region)} 都做了。
+     *
+     * @param enchantIdToMaxLevel 附魔注册名（含命名空间）→ 该容器里的最高等级
+     * @param customNamesLower    物品自定义名（已转小写）
+     */
+    public void addItemMeta(String containerKey, Map<String, Integer> enchantIdToMaxLevel, Set<String> customNamesLower) {
+        if (containerKey == null) {
+            return;
+        }
+        if (enchantIdToMaxLevel != null) {
+            for (Map.Entry<String, Integer> e : enchantIdToMaxLevel.entrySet()) {
+                String id = e.getKey();
+                Integer level = e.getValue();
+                if (id == null || level == null || level <= 0) {
+                    continue;
+                }
+                enchants.computeIfAbsent(id, k -> new TreeMap<>()).merge(containerKey, level, Math::max);
+            }
+        }
+        if (customNamesLower != null) {
+            for (String name : customNamesLower) {
+                if (name == null || name.isEmpty()) {
+                    continue;
+                }
+                customNames.computeIfAbsent(name, k -> new TreeSet<>()).add(containerKey);
+            }
+        }
+    }
+
+    /**
+     * 哪些容器里有这个附魔、最高几级。
+     *
+     * @return containerKey → 该附魔在这个容器里的最高等级（按 containerKey 排序）；没命中就是空表
+     */
+    public Map<String, Integer> enchantHits(String enchantId) {
+        Map<String, Integer> per = enchantId == null ? null : enchants.get(enchantId);
+        return per == null ? new LinkedHashMap<>() : new LinkedHashMap<>(per);
+    }
+
+    /** 已经索引到的附魔 id（含命名空间，顺序稳定） */
+    public Set<String> enchantIds() {
+        return new TreeSet<>(enchants.keySet());
+    }
+
+    /**
+     * 哪些容器里有带这个自定义名的物品。名字要先转小写（和索引时一致）。
+     *
+     * @return 容器 key（顺序稳定）；没命中就是空集
+     */
+    public Set<String> customNameHits(String nameLower) {
+        Set<String> keys = nameLower == null ? null : customNames.get(nameLower);
+        return keys == null ? new TreeSet<>() : new TreeSet<>(keys);
+    }
+
+    /** 已经索引到的自定义名（小写，顺序稳定） */
+    public Set<String> customNames() {
+        return new TreeSet<>(customNames.keySet());
+    }
+
+    /** 把一个容器在附魔 / 自定义名索引里的条目全部清掉（记录被删掉或被新内容替换时用） */
+    private void dropMeta(String containerKey) {
+        if (containerKey == null) {
+            return;
+        }
+        for (Iterator<Map.Entry<String, Map<String, Integer>>> it = enchants.entrySet().iterator(); it.hasNext(); ) {
+            Map<String, Integer> per = it.next().getValue();
+            per.remove(containerKey);
+            if (per.isEmpty()) {
+                it.remove();
+            }
+        }
+        for (Iterator<Map.Entry<String, Set<String>>> it = customNames.entrySet().iterator(); it.hasNext(); ) {
+            Set<String> keys = it.next().getValue();
+            keys.remove(containerKey);
+            if (keys.isEmpty()) {
+                it.remove();
+            }
+        }
+    }
+
+    /**
+     * 按一条记录里的 ItemStack 重算它的附魔 / 自定义名条目（旧条目由调用方先 {@link #dropMeta} 清掉）。
+     *
+     * <p>{@link #accept} 是「记录进入索引」的唯一入口，而 {@link com.ds.warehouse.index.IndexRefresh}
+     * 轮询发现箱内物品变了时只会调 {@code accept}、不会另调 {@link #addItemMeta}，所以这里必须以
+     * 记录里的实际内容为准再收一次，否则取走附魔物品后索引还留着旧附魔。
+     */
+    private void rebuildMeta(ContainerRecord rec) {
+        Map<String, Integer> ench = new TreeMap<>();
+        Set<String> names = new LinkedHashSet<>();
+        for (ContainerRecord.StoredStack ss : rec.contents) {
+            if (ss.stack().getCount() <= 0) {
+                continue;
+            }
+            Scanner.collectMeta(ss.stack(), ench, names);
+        }
+        addItemMeta(key(rec.dimension, rec.pos), ench, names);
     }
 
     private static boolean insideAny(ContainerRecord rec, List<Region> regions) {

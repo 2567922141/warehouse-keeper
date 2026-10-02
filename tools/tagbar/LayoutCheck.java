@@ -73,6 +73,53 @@ public final class LayoutCheck {
         // 界面贴着左边缘时右边还有地方，仍走右侧竖栏
         expectMode(1920, 1080, 4, 4, 176, 222, TagBarLayout.Mode.RIGHT);
 
+        // ---------------------------------------------------------------- 0.22.0 · BUG1 停靠偏好
+        // 面板「维护」页里那个循环按钮（auto/right/left/top/bottom，客户端 config 落盘）。
+        // 偏好只改「谁先试」，不放宽任何几何条件 ⇒ 每个取值都要把上面整套体检重跑一遍。
+        String[] docks = {"auto", "right", "left", "top", "bottom"};
+        for (String dock : docks) {
+            for (int[] screen : screens) {
+                for (int[] gui : guis) {
+                    checkDocked(screen[0], screen[1], gui[0], gui[1], 10, 3, dock, 2);
+                }
+            }
+            // 分类走自绘下拉时的真实配置（mainCount=0）：常规窗口 + 玩家实机复现的窄窗各一遍
+            checkDocked(854, 480, 176, 222, 0, 3, dock, 2);
+            checkDocked(285, 163, 176, 222, 0, 3, dock, 2);
+        }
+        // 两侧都放得下时的先后顺序：auto 在界面尺寸 ≤1 时先贴左（窗口逻辑宽度大 ⇒ JEI 占着右边），
+        // >1 时保持老行为「先贴右」；显式 right/left 则完全按玩家说的来
+        expectDockedMode(1920, 1080, 176, 222, "auto", 1, TagBarLayout.Mode.LEFT);
+        expectDockedMode(1920, 1080, 176, 222, "auto", 2, TagBarLayout.Mode.RIGHT);
+        expectDockedMode(1920, 1080, 176, 222, "left", 2, TagBarLayout.Mode.LEFT);
+        expectDockedMode(1920, 1080, 176, 222, "right", 1, TagBarLayout.Mode.RIGHT);
+        // 上/下停靠：大窗口里竖栏本来更优先，偏好生效后必须真的走横条，并且贴对那一条边
+        {
+            TagBarLayout.Plan top = TagBarLayout.plan(1920, 1080, 872, 107, 176, 222, 10, 3, "top", 2);
+            TagBarLayout.Plan bottom = TagBarLayout.plan(1920, 1080, 872, 107, 176, 222, 10, 3, "bottom", 2);
+            ok(top.mode == TagBarLayout.Mode.STRIP, "停靠「上」：应走横条，实际 " + top.mode + "（" + top.note + "）");
+            ok(bottom.mode == TagBarLayout.Mode.STRIP, "停靠「下」：应走横条，实际 " + bottom.mode + "（" + bottom.note + "）");
+            ok(minY(top) == TagBarLayout.MARGIN, "停靠「上」：横条应贴上沿（minY=" + minY(top) + "）");
+            ok(maxBottom(bottom) == 1080 - TagBarLayout.MARGIN,
+                    "停靠「下」：横条应贴下沿（maxBottom=" + maxBottom(bottom) + "）");
+            ok(minY(top) < minY(bottom), "停靠「上」的横条应画在「下」的上方");
+        }
+        // 竖向空间不足时：「上/下」偏好也不能让按钮跑出屏幕或压住箱子界面，只能按老降级链退化
+        for (String dock : new String[]{"top", "bottom"}) {
+            TagBarLayout.Plan p = TagBarLayout.plan(1920, 300, 872, 39, 176, 222, 10, 3, dock, 2);
+            ok(p.mode != TagBarLayout.Mode.HIDDEN, "停靠 " + dock + "：放不下横条时应退化到别的形态，而不是整条不显示");
+            for (TagBarLayout.Box b : p.boxes) {
+                ok(b.inside(1920, 300), "停靠 " + dock + "：" + b + " 越界");
+            }
+        }
+        // 非法 / null 停靠值一律当 auto（客户端 config 是手改得到的文本文件，不能信）
+        ok(TagBarLayout.plan(1920, 1080, 872, 107, 176, 222, 10, 3, "sideways", 2).mode
+                        == TagBarLayout.plan(1920, 1080, 872, 107, 176, 222, 10, 3, "auto", 2).mode,
+                "非法停靠值应等价于 auto");
+        ok(TagBarLayout.plan(1920, 1080, 872, 107, 176, 222, 10, 3, null, 2).mode
+                        == TagBarLayout.plan(1920, 1080, 872, 107, 176, 222, 10, 3, "auto", 2).mode,
+                "null 停靠值应等价于 auto");
+
         // 文案统一后的常量体检：标题一律「标签：<值>」，所以窄到 MIN 也必须放得下被截断的「标签：…」，
         // WIDE 也必须放得下最长的一条「标签：建材方块（自动）▾」（4 字分类名 + 自动后缀 + 箭头）。
         // 本文件没有字体，按「全角字 9 像素、ASCII 6 像素」估宽 —— Minecraft 默认字体里中文走 unifont，步进就是 9。
@@ -98,9 +145,24 @@ public final class LayoutCheck {
     private static void check(int screenW, int screenH, int guiW, int guiH, int mainCount, int extraCount) {
         int guiX = (screenW - guiW) / 2;
         int guiY = (screenH - guiH) / 2;
-        TagBarLayout.Plan plan = TagBarLayout.plan(screenW, screenH, guiX, guiY, guiW, guiH, mainCount, extraCount);
-        String where = screenW + "x" + screenH + " gui " + guiW + "x" + guiH;
+        verify(TagBarLayout.plan(screenW, screenH, guiX, guiY, guiW, guiH, mainCount, extraCount),
+                screenW, screenH, guiX, guiY, guiW, guiH, mainCount, extraCount,
+                screenW + "x" + screenH + " gui " + guiW + "x" + guiH);
+    }
 
+    /** 同一套体检，但走带停靠偏好的重载（0.22.0 · BUG1） */
+    private static void checkDocked(int screenW, int screenH, int guiW, int guiH,
+                                    int mainCount, int extraCount, String dock, int guiScale) {
+        int guiX = (screenW - guiW) / 2;
+        int guiY = (screenH - guiH) / 2;
+        verify(TagBarLayout.plan(screenW, screenH, guiX, guiY, guiW, guiH, mainCount, extraCount, dock, guiScale),
+                screenW, screenH, guiX, guiY, guiW, guiH, mainCount, extraCount,
+                screenW + "x" + screenH + " gui " + guiW + "x" + guiH + " dock=" + dock + " scale=" + guiScale);
+    }
+
+    /** 一次布局的几何体检：按钮数、越界、压住箱子界面、彼此重叠 */
+    private static void verify(TagBarLayout.Plan plan, int screenW, int screenH, int guiX, int guiY,
+                               int guiW, int guiH, int mainCount, int extraCount, String where) {
         if (plan.mode == TagBarLayout.Mode.HIDDEN) {
             ok(plan.boxes.isEmpty(), where + "：HIDDEN 时不该有按钮");
             return;
@@ -132,6 +194,34 @@ public final class LayoutCheck {
                 ok(!a.overlaps(b), where + "：" + a + " 与 " + b + " 重叠");
             }
         }
+        checks++;
+    }
+
+    /** 最高的那条边（横条可能铺两行，所以按所有按钮取 min/max） */
+    private static int minY(TagBarLayout.Plan plan) {
+        int y = Integer.MAX_VALUE;
+        for (TagBarLayout.Box b : plan.boxes) {
+            y = Math.min(y, b.y);
+        }
+        return y == Integer.MAX_VALUE ? -1 : y;
+    }
+
+    /** 最低的那条边 */
+    private static int maxBottom(TagBarLayout.Plan plan) {
+        int y = Integer.MIN_VALUE;
+        for (TagBarLayout.Box b : plan.boxes) {
+            y = Math.max(y, b.y + b.h);
+        }
+        return y == Integer.MIN_VALUE ? -1 : y;
+    }
+
+    private static void expectDockedMode(int screenW, int screenH, int guiW, int guiH,
+                                        String dock, int guiScale, TagBarLayout.Mode want) {
+        int guiX = (screenW - guiW) / 2;
+        int guiY = (screenH - guiH) / 2;
+        TagBarLayout.Plan plan = TagBarLayout.plan(screenW, screenH, guiX, guiY, guiW, guiH, 10, 3, dock, guiScale);
+        ok(plan.mode == want, screenW + "x" + screenH + " dock=" + dock + " scale=" + guiScale
+                + "：期望 " + want + "，实际 " + plan.mode + "（" + plan.note + "）");
         checks++;
     }
 

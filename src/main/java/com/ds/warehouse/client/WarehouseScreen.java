@@ -191,7 +191,8 @@ public class WarehouseScreen extends Screen {
     private int ph;
     private boolean compact;
 
-    private int sel;
+    /** 第 0 页左栏选中的仓库；{@code -1} = 全部仓库（0.22.0 · 优化10 的默认值） */
+    private int sel = -1;   // -1 = 全部仓库
     private int scroll;
     private int dir;
 
@@ -257,6 +258,15 @@ public class WarehouseScreen extends Screen {
     /** 箱子页关键字（坐标或方块名；空 = 不过滤） */
     private String boxFilter = "";
     private EditBox boxFilterBox;
+    /**
+     * 「箱子」子页的附魔 / 自定义名全局搜索行（0.22.0 · 优化11）：一个输入框 + 一个按钮，
+     * 点下去＝替玩家敲 {@code /warehouse enchants find <输入>}，结果由服务端输出在聊天栏。
+     * 高度不够时这里是 {@code null}（整行不建，清单优先）。
+     */
+    private R boxSearchRow;
+    private EditBox boxEnchBox;
+    /** 附魔搜索框里当前的文字（发指令用；不落盘） */
+    private String boxEnchText = "";
     /** 服务端太旧、没有按需查询通道时的提示（四页共用一句话） */
     private static final String QUERY_UNSUPPORTED = "当前服务器不支持面板查询（服务端版本较旧）。";
 
@@ -538,6 +548,8 @@ public class WarehouseScreen extends Screen {
         itemCtlRow = null;
         pageRow = null;
         boxFilterBox = null;
+        boxSearchRow = null;
+        boxEnchBox = null;
         if (catDd != null) {
             catDd.close();
         }
@@ -636,19 +648,17 @@ public class WarehouseScreen extends Screen {
                 if (itemsPage) {
                     layoutItemsStack(bf, rest.h());
                 } else if (boxesPage) {
-                    boxRow = bf.takeTop(ROW_H, GAP);
-                    boxBox = bf.rest();
+                    layoutBoxesStack(bf);
                 }
             }
             return;
         }
         rightCol = new R(content.x() + leftW + GAP, content.y(), rightW, content.h());
 
-        // 「箱子」子页：右栏 = 控件行（排序 / 只看非空，按钮是控件）+ 箱子清单
+        // 「箱子」子页：右栏 = 控件行（排序 / 只看非空，按钮是控件）+ 附魔搜索行 + 箱子清单
         if (boxesPage) {
             Flow bf = new Flow(rightCol);
-            boxRow = bf.takeTop(ROW_H, GAP);
-            boxBox = bf.rest();
+            layoutBoxesStack(bf);
             return;
         }
 
@@ -670,6 +680,19 @@ public class WarehouseScreen extends Screen {
         int infoNeed = infoLines * LINE_H + 2;
         infoBlock = rightCol.h() - gridH - GAP >= infoNeed
                 ? new R(rightCol.x(), rightCol.y(), rightCol.w(), infoNeed) : null;
+    }
+
+    /**
+     * 「箱子」子页右栏的竖直堆叠：控件行（关键字 / 排序 / 只看非空）→ 附魔搜索行 → 箱子清单。
+     *
+     * <p>附魔搜索行（0.22.0 · 优化11）是**可选**的：只有清单还能留下三行时才建，
+     * 小窗口里宁可没有搜索框，也不能让箱子清单消失。两栏与单栏两条布局路径共用这里，
+     * 判据完全一致。
+     */
+    private void layoutBoxesStack(Flow bf) {
+        boxRow = bf.takeTop(ROW_H, GAP);
+        boxSearchRow = bf.left() >= ROW_H + GAP + 3 * BOX_ROW_H ? bf.takeTop(ROW_H, GAP) : null;
+        boxBox = bf.rest();
     }
 
     /**
@@ -920,6 +943,18 @@ public class WarehouseScreen extends Screen {
     }
 
     /**
+     * 左栏第 0 行（合成的「全部仓库」）下面那 1~2 行小字（0.22.0 · 优化10）。
+     *
+     * <p>它不是一个真实的仓库，所以不能走 {@link #metaLines}：这里只说清楚「默认范围」和仓库个数。
+     */
+    private List<String> allRegionsMeta(int regionCount) {
+        List<String> out = new ArrayList<>();
+        out.add("跨所有仓库统计（默认）");
+        out.add(regionCount <= 0 ? "暂无仓库" : ("共 " + regionCount + " 个仓库"));
+        return out;
+    }
+
+    /**
      * 把「详情」按可用宽度折成 1~2 行：整段整段地放到下一行，绝不在段中间硬切；
      * 单段本身超宽、或超过两行时，才对最后一行做截断（带省略号）。
      */
@@ -994,8 +1029,8 @@ public class WarehouseScreen extends Screen {
     private void layoutCheck() {
         List<R> leaves = new ArrayList<>();
         for (R r : new R[]{headerTitle, tabs, subTabs, captionLeft, captionRight, statusBox, closeBtn, listBox,
-                searchRow, boxRow, boxBox, infoCapLeft, infoCapRight, infoBox, infoBlock, gridBox, pickRow, pickCap,
-                pickBox, orderRow, rowsBox, footRow, notesBox, assignLabel, assignPick, assignOk}) {
+                searchRow, boxRow, boxSearchRow, boxBox, infoCapLeft, infoCapRight, infoBox, infoBlock, gridBox,
+                pickRow, pickCap, pickBox, orderRow, rowsBox, footRow, notesBox, assignLabel, assignPick, assignOk}) {
             if (r == null || r.empty()) {
                 continue;
             }
@@ -1150,7 +1185,7 @@ public class WarehouseScreen extends Screen {
     private void initRegions() {
         switch (subName()) {
             case "新建" -> initRegionsNew();
-            case "扩建" -> initRegionsGrow();
+            case "扩建/缩小" -> initRegionsGrowShrink();
             case "物品" -> initRegionsItems();
             case "箱子" -> initRegionsBoxes();
             case "维护" -> initRegionsMaint();
@@ -1209,8 +1244,14 @@ public class WarehouseScreen extends Screen {
         }
     }
 
-    /** 子页「扩建」：底行是「方向 + 格数 + 扩建」，往上依次是「扩建至我当前所站位置」「并进新圈范围」 */
-    private void initRegionsGrow() {
+    /**
+     * 子页「扩建/缩小」（0.22.0 · 优化8：原名就叫「扩建」）。
+     *
+     * <p>底行是共用的「方向 + 格数 + 扩建」，往上依次是「缩小」（同一个方向/格数，带二次确认）、
+     * 「扩建至我当前所站位置」、「缩到我所站位置」、「并进新圈范围」。
+     * 四种操作都必须点名一个具体仓库，所以走 {@link #withOneRegion}（选中「全部仓库」时给提示并拒绝）。
+     */
+    private void initRegionsGrowShrink() {
         if (gridBox == null || gridBox.empty() || gridRows <= 0) {
             return;
         }
@@ -1229,21 +1270,42 @@ public class WarehouseScreen extends Screen {
         countBox.setValue(countText);
         countBox.setResponder(v -> countText = v);
         addRenderableWidget(countBox);
-        btn("扩建", new R(row.right() - expandW, row.y(), expandW, row.h()), b -> withRegion(name -> {
+        btn("扩建", new R(row.right() - expandW, row.y(), expandW, row.h()), b -> withOneRegion(name -> {
             int amount = parseCount();
             run("warehouse region grow " + q(name) + " " + DIR_KEYS[dir] + " " + amount,
                     "已把仓库 " + name + " 朝" + DIR_NAMES[dir] + "扩 " + amount + " 格");
         }));
         if (rows > 1) {
-            btn("扩建至我当前所站位置", gridRowFromBottom(1), b ->
-                    withRegion(name -> run("warehouse region grow " + q(name),
+            R row1 = gridRowFromBottom(1);
+            R growTo = gridRight(row1);
+            R shrink = gridLeft(row1);
+            // 缩小：与扩建共用「方向 + 格数」，但因为不可逆，先弹一次二次确认
+            btn(pickFit(shrink.w() - 6, "缩小", "缩"), shrink, b -> withOneRegion(name -> {
+                int amount = parseCount();
+                ask("缩小仓库「" + name + "」", "将把仓库「" + name + "」朝" + DIR_NAMES[dir] + "缩 " + amount
+                        + " 格（箱子及其中的物品不会被改动）。确定要继续吗？",
+                        () -> run("warehouse region shrink " + q(name) + " " + DIR_KEYS[dir] + " " + amount,
+                                "已把仓库 " + name + " 朝" + DIR_NAMES[dir] + "缩 " + amount + " 格"));
+            }));
+            btn(pickFit(growTo.w() - 6, "扩建至我当前所站位置", "扩建至我所站位置", "扩建至位置", "扩建到位置"),
+                    growTo, b -> withOneRegion(name -> run("warehouse region grow " + q(name),
                             "已把仓库 " + name + " 扩建至你的位置")));
         }
         if (rows > 2) {
-            btn("并进新圈范围", gridRowFromBottom(2), b -> withRegion(name ->
-                    ask("并进新圈范围", "将把你新圈定的范围并入仓库「" + name + "」，此仓库的范围会变大"
-                            + "（箱子内的物品不动，仅定义发生变化）。确定要继续吗？",
-                            () -> run("warehouse region merge " + q(name), "已把你圈的新范围并进 " + name))));
+            R row2 = gridRowFromBottom(2);
+            R shrinkTo = gridLeft(row2);
+            R merge = gridRight(row2);
+            btn(pickFit(shrinkTo.w() - 6, "缩到我所站位置", "缩到我所站位置", "缩到我的位置", "缩到位置"),
+                    shrinkTo, b -> withOneRegion(name ->
+                            ask("缩到我所站位置", "将把仓库「" + name + "」的范围收缩到你所站的位置"
+                                    + "（箱子及其中的物品不会被改动）。确定要继续吗？",
+                                    () -> run("warehouse region shrink " + q(name),
+                                            "已把仓库 " + name + " 缩到你的位置"))));
+            btn(pickFit(merge.w() - 6, "并进新圈范围", "并进新圈范围", "并进新范围", "并进范围"),
+                    merge, b -> withOneRegion(name ->
+                            ask("并进新圈范围", "将把你新圈定的范围并入仓库「" + name + "」，此仓库的范围会变大"
+                                    + "（箱子内的物品不动，仅定义发生变化）。确定要继续吗？",
+                                    () -> run("warehouse region merge " + q(name), "已把你圈的新范围并进 " + name))));
         }
     }
 
@@ -1369,9 +1431,46 @@ public class WarehouseScreen extends Screen {
             b.setMessage(Component.literal(boxFilterLabel()));
             boxScroll = 0;
         });
+
+        // 0.22.0 · 优化11：全局搜索入口（附魔 / 自定义名）。点一下＝替玩家敲一条
+        // `/warehouse enchants find <输入>`，结果由服务端输出在聊天栏 —— 这里不新增任何协议/请求类型，
+        // 也不依赖按需查询通道（老服务端照样能用），所以放在 QueryClient.supported() 判断之外。
+        if (boxSearchRow != null && !boxSearchRow.empty()) {
+            int btnW = Math.min(160, Math.max(96, boxSearchRow.w() * 32 / 100));
+            int inW = Math.max(60, boxSearchRow.w() - btnW - GAP);
+            boxEnchBox = new EditBox(this.font, boxSearchRow.x(), boxSearchRow.y() + 1, inW,
+                    Math.max(8, boxSearchRow.h() - 2), Component.literal("附魔 / 自定义名"));
+            boxEnchBox.setMaxLength(48);
+            boxEnchBox.setValue(boxEnchText);
+            rememberHint(boxEnchBox, hintFor(inW, "附魔 / 自定义名：例 锋利 · 结果输出在聊天栏",
+                    "例 锋利 · 结果输出在聊天栏", "附魔 / 自定义名", "搜附魔"));
+            boxEnchBox.setResponder(v -> boxEnchText = v);
+            addRenderableWidget(boxEnchBox);
+            btn(pickFit(btnW - 6, "搜索附魔/自定义名", "搜附魔/自定义名", "搜索附魔", "搜附魔"),
+                    new R(boxSearchRow.right() - btnW, boxSearchRow.y(), btnW, boxSearchRow.h()),
+                    b -> searchEnchants());
+        }
     }
 
-    /** 子页「维护」：底行是「重新扫描 + 显示边界」，上面一行是危险的「删除仓库」 */
+    /**
+     * 「箱子」页的附魔 / 自定义名全局搜索（0.22.0 · 优化11）。
+     *
+     * <p>面板只负责把玩家写的词拼进指令：{@code warehouse enchants find <词>}，
+     * 服务端的输出直接进聊天栏（{@link #run} 已经挂着聊天栏回执的提示通道）。
+     */
+    private void searchEnchants() {
+        String kw = boxEnchText == null ? "" : boxEnchText.replace('\n', ' ').replace('\r', ' ').trim();
+        if (kw.isEmpty()) {
+            status = "请先在「搜索附魔/自定义名」输入框里填一个附魔名或物品自定义名。";
+            return;
+        }
+        run("warehouse enchants find " + kw, "已请求搜索「" + kw + "」，结果输出在聊天栏。");
+    }
+
+    /**
+     * 子页「维护」：底行是「重新扫描 + 显示/隐藏边界（按当前仓库）」，上面一行是
+     * 「标签栏位置（循环切换）+ 删除仓库」。
+     */
     private void initRegionsMaint() {
         if (gridBox == null || gridBox.empty() || gridRows <= 0) {
             return;
@@ -1381,13 +1480,37 @@ public class WarehouseScreen extends Screen {
         btn("重新扫描", gridLeft(row), b -> withRegionOrAll(name ->
                 run(name.isEmpty() ? "warehouse scan" : "warehouse scan " + q(name), "已让游戏开始扫描")));
         borderBtn = btn(borderLabel(), gridRight(row), b -> toggleBorder());
+        // 优化10：边界是「按仓库」的，没选中具体仓库时这个按钮点不动（文案里也写明了）
+        borderBtn.active = !selectedRegion().isEmpty();
         if (rows > 1) {
             R up = gridRowFromBottom(1);
-            btn("删除仓库", up, b -> withRegion(name ->
+            // BUG1：标签栏停靠位置（客户端 config，逐个玩家自己设），点一下循环 自动→右→左→上→下
+            btn(tagBarDockLabel(), gridLeft(up), b -> cycleTagBarDock(b));
+            btn("删除仓库", gridRight(up), b -> withOneRegion(name ->
                     ask("删除仓库「" + name + "」", "将仅删除此仓库的「范围定义」：箱子及其中的物品不会被改动，"
                             + "搬运工亦不会操作它们。删除后可重新圈定范围再次创建。确定要删除吗？",
                             () -> run("warehouse region remove " + q(name), "已删除仓库 " + name))));
         }
+    }
+
+    /** 「维护」页那个循环按钮上的字（按钮挪不动，只换文案） */
+    private String tagBarDockLabel() {
+        return "标签栏位置：" + ClientPrefs.label(ClientPrefs.dock());
+    }
+
+    /**
+     * BUG1：循环切换箱子标签栏的停靠位置，并立刻写客户端 config。
+     *
+     * <p>标签栏每次布局都重新调 {@code TagBarLayout.plan(..., ClientPrefs.dock(), guiScale)}，
+     * 所以不用重开箱子界面就已经生效；状态栏那句话就是给玩家确认用的。
+     */
+    private void cycleTagBarDock(Button b) {
+        ClientPrefs prefs = ClientPrefs.get();
+        prefs.tagBarDock = ClientPrefs.next(prefs.tagBarDock);
+        prefs.save();
+        b.setMessage(Component.literal(tagBarDockLabel()));
+        status = "标签栏位置已设为「" + ClientPrefs.label(prefs.tagBarDock) + "」，已生效"
+                + ("auto".equals(prefs.tagBarDock) ? "（默认：界面尺寸 ≤ 1 时优先贴箱子左侧，避开 JEI）" : "") + "。";
     }
 
     /** 第 1 页「取货」的控件 */
@@ -1505,18 +1628,20 @@ public class WarehouseScreen extends Screen {
             R row = rowRect(rowsBox, idx, rowH);
             R[] b = botButtons(row);
             ClientSnapshot.Bot bot = bots.get(idx);
+            // name = 注册名（指令里必须用它，那是身份）；shown = 给人看的名字（优化7 的自定义显示名）
             String name = bot.name;
+            String shown = bot.shown();
             btn(pickFit(Math.max(8, b[0].w() - 6), "设值守点", "设点位", "点位"), b[0], x ->
-                    run("warehouse bot spot " + q(name), "已把「" + name + "」值守点设为你的当前位置"));
+                    run("warehouse bot spot " + q(name), "已把「" + shown + "」值守点设为你的当前位置"));
             btn(bot.present ? "收回" : "上岗", b[1], x ->
                     run(bot.present ? "warehouse bot kill " + q(name) : "warehouse bot spawn " + q(name),
-                            bot.present ? "已让「" + name + "」退场" : "已让「" + name + "」上岗"));
+                            bot.present ? "已让「" + shown + "」退场" : "已让「" + shown + "」上岗"));
             btn("停止", b[2], x ->
-                    run("warehouse bot stop " + q(name), "已让「" + name + "」停止当前任务"));
-            btn("删除", b[3], x -> ask("删除搬运工「" + name + "」",
-                    "将从名册里删掉「" + name + "」：它身上的物品会先收回箱子里，然后这个人形从世界里消失。"
+                    run("warehouse bot stop " + q(name), "已让「" + shown + "」停止当前任务"));
+            btn("删除", b[3], x -> ask("删除搬运工「" + shown + "」",
+                    "将从名册里删掉「" + shown + "」：它身上的物品会先收回箱子里，然后这个人形从世界里消失。"
                             + "此操作不可撤销（要用可以再点「＋新增搬运工」）。确定删除吗？",
-                    () -> run("warehouse bot remove " + q(name), "已删除搬运工「" + name + "」")));
+                    () -> run("warehouse bot remove " + q(name), "已删除搬运工「" + shown + "」")));
         }
 
         // 分配那一行：选择框（点开仓库清单）+ 确定
@@ -1670,7 +1795,7 @@ public class WarehouseScreen extends Screen {
                 }
                 return;
             }
-            if (choice < 0 || choice > count()) {
+            if (choice < 0 || choice >= count()) {
                 choice = 0;
             }
         }
@@ -1744,22 +1869,31 @@ public class WarehouseScreen extends Screen {
             scroll = Math.max(0, Math.min(scroll, Math.max(0, n - rows)));
         }
 
-        /** 选中第 i 条候选（仓库下拉选具体仓库时顺带同步「仓库」页的选中项与世界里的边界线，不发任何指令） */
+        /**
+         * 选中第 i 条候选（仓库下拉选具体仓库时顺带同步「仓库」页的选中项；不发任何指令）。
+         *
+         * <p>0.22.0 · 优化10：第 0 条是合成的「全部仓库」，选中它就是 {@code sel = -1} ——
+         * 这时**不去碰** {@link RegionBorder}（边界是逐个仓库的，没有「全部」这种开关）。
+         */
         private void select(int i) {
-            if (i < 0 || i > count()) {
+            if (i < 0 || i >= count()) {
                 return;
             }
             choice = i;
             touched = true;
-            if (entries == null && i > 0) {
+            if (entries == null) {
                 List<RegionCache.Entry> regions = RegionCache.list();
-                int k = i - 1;
-                if (k < regions.size()) {
-                    sel = k;
-                    pickScroll = 0;
-                    infoScroll = 0;
-                    RegionBorder.select(regions.get(k));
+                if (i <= 0) {
+                    sel = -1;
+                } else {
+                    int k = i - 1;
+                    if (k < regions.size()) {
+                        sel = k;
+                        RegionBorder.touch(regions.get(k));
+                    }
                 }
+                pickScroll = 0;
+                infoScroll = 0;
             }
             if (onSelect != null) {
                 onSelect.accept(i);
@@ -1835,10 +1969,11 @@ public class WarehouseScreen extends Screen {
 
     /** 取货页当前的取货范围：选中「全部仓库」时是全部，否则是当前仓库 */
     private String pickScope() {
-        if (pickDd != null && pickDd.choice <= 0) {
+        if (pickDd == null || pickDd.choice <= 0) {
             return "全部仓库";
         }
-        String region = selectedRegion();
+        // 优化10：与 pickItems() 用同一个来源（下拉里选中的那一条），不再绕道 selectedRegion()
+        String region = clean(pickDd.entryName(pickDd.choice));
         return region.isEmpty() ? "未选仓库" : region;
     }
 
@@ -1923,13 +2058,13 @@ public class WarehouseScreen extends Screen {
     /**
      * 二级页签的名字。
      *
-     * <p>「仓库」页管理员 6 个（概览 / 新建 / 扩建 / 物品 / 箱子 / 维护），普通玩家只给 3 个（概览 / 物品 / 箱子）；
+     * <p>「仓库」页管理员 6 个（概览 / 新建 / 扩建/缩小 / 物品 / 箱子 / 维护），普通玩家只给 3 个（概览 / 物品 / 箱子）；
      * 「搬运工」页 2 个（名册值守 / 整理）；「权限」页 2 个（权限 / 审计）；「取货」没有子页。
      */
     private String[] subNames() {
         return switch (tab) {
             case 0 -> admin
-                    ? new String[]{"概览", "新建", "扩建", "物品", "箱子", "维护"}
+                    ? new String[]{"概览", "新建", "扩建/缩小", "物品", "箱子", "维护"}
                     : new String[]{"概览", "物品", "箱子"};
             case 2 -> admin ? new String[]{"名册值守", "整理"} : new String[0];
             case 3 -> admin ? new String[]{"权限", "审计"} : new String[0];
@@ -1997,9 +2132,9 @@ public class WarehouseScreen extends Screen {
     /** 「仓库」页各子页右栏按钮网格要几行（0 = 右栏不放网格） */
     private int gridNeed(String subName) {
         return switch (subName) {
-            case "概览" -> 1;        // 扫描仓库 + 显示边界 并排一行
-            case "新建" -> 2;        // 底行 名字+新建仓库，上行 点1/点2
-            case "扩建" -> 3;
+            case "概览" -> 1;          // 扫描仓库 + 显示边界 并排一行
+            case "新建" -> 2;          // 底行 名字+新建仓库，上行 点1/点2
+            case "扩建/缩小" -> 3;      // 扩建行 / 缩小+扩建到此处行 / 缩到此处+并进新范围行
             case "维护" -> 2;
             default -> 0;   // 物品（整块清单）、箱子（自带控件行）
         };
@@ -2040,17 +2175,18 @@ public class WarehouseScreen extends Screen {
             }
             default -> {
                 String sel = selectedRegion();
-                String who = sel.isEmpty() ? "未选中仓库" : sel;
+                // 优化10：sel == -1 时左栏选中的就是「全部仓库」，不要再写成「未选中仓库」
+                String who = sel.isEmpty() ? "全部仓库" : sel;
                 int regions = RegionCache.list().size();
                 yield switch (subName()) {
                     case "新建" -> pickFit(w,
                             "新建仓库：站到一角点「点1」→ 站到对角点「点2」→ 填名字点「新建仓库」",
                             "新建仓库：点1 → 点2 → 填名字 → 新建",
                             "新建仓库：点1 → 点2 → 新建");
-                    case "扩建" -> pickFit(w,
-                            "扩建 · 选中：" + who + "（可「扩建至我当前所站位置」，也可选方向填格数）",
-                            "扩建 · " + who + "（也可选方向填格数）",
-                            "扩建 · " + who);
+                    case "扩建/缩小" -> pickFit(w,
+                            "扩建/缩小 · 选中：" + who + "（缩到我所站位置，或选方向填格数）",
+                            "扩建/缩小 · " + who + "（也可选方向填格数）",
+                            "扩建/缩小 · " + who);
                     case "箱子" -> {
                         int cnt = boxesOf(sel).size();
                         yield pickFit(w,
@@ -2059,7 +2195,7 @@ public class WarehouseScreen extends Screen {
                                 "箱子 · " + cnt + " 只");
                     }
                     case "维护" -> pickFit(w,
-                            "维护 · 选中：" + who + "（删除仓库、重新扫描都在这里）",
+                            "维护 · 选中：" + who + "（标签栏位置、删除仓库、重新扫描都在这里）",
                             "维护 · " + who,
                             "维护");
                     case "物品" -> pickFit(w,
@@ -2086,7 +2222,10 @@ public class WarehouseScreen extends Screen {
     private List<ClientSnapshot.Item> pickItems() {
         String q = pickQuery.trim().toLowerCase(Locale.ROOT);
         if (pickDd == null || pickDd.choice > 0) {
-            List<ClientSnapshot.Item> all = itemsOf(selectedRegion());
+            // 优化10：直接取下拉里那一条的名字（不再依赖 selectedRegion() 的隐式同步 ——
+            // 「仓库」页选「全部仓库」时 selectedRegion() 是空串，而下拉可以仍然指着某个具体仓库）
+            String name = pickDd == null ? selectedRegion() : pickDd.entryName(pickDd.choice);
+            List<ClientSnapshot.Item> all = itemsOf(name);
             if (q.isEmpty()) {
                 return all;
             }
@@ -2172,6 +2311,125 @@ public class WarehouseScreen extends Screen {
         return local != null && !local.isEmpty() ? local : QueryClient.str(row, "name");
     }
 
+    // ------------------------------------------------ 容器详情：附魔 / 自定义名（优化11）
+
+    /**
+     * 附魔 id → 客户端语言显示名的缓存。附魔名在进游戏后不会变，所以缓存一次就够
+     * （和 {@link ClientNames} 对物品名做的事一样，只是附魔那边没有现成的方法可用）。
+     */
+    private static final Map<String, String> ENCHANT_NAMES = new LinkedHashMap<>();
+
+    /**
+     * 容器详情一格的补充信息（0.22.0 · 优化11）：附魔 + 自定义名。
+     *
+     * <p>字段来自写者 A 的 {@code SlotDetail}：{@code ench} 形如
+     * {@code minecraft:sharpness@5,minecraft:unbreaking@3}，{@code customName} 是自定义名原文
+     * （**不是** {@code name} —— 那个字段是物品显示名，{@link #queryItemName} 还在用它兜底）。
+     * 两个字段都没有时（老服务端 / 附魔字段还没上线）返回空串，行不变。
+     */
+    private static String slotMeta(JsonObject row) {
+        StringBuilder sb = new StringBuilder();
+        String ench = QueryClient.str(row, "ench");
+        if (!ench.isEmpty()) {
+            String text = enchantList(ench);
+            if (!text.isEmpty()) {
+                sb.append(" · ").append(text);
+            }
+        }
+        String custom = QueryClient.str(row, "customName");
+        if (!custom.isEmpty()) {
+            sb.append(" · «").append(custom).append('»');
+        }
+        return sb.toString();
+    }
+
+    /** {@code id@等级,id@等级} → 「锋利 V · 耐久 III」（等级解析不出来就只显示名字） */
+    private static String enchantList(String raw) {
+        StringBuilder sb = new StringBuilder();
+        for (String part : raw.split(",")) {
+            String one = part.trim();
+            if (one.isEmpty()) {
+                continue;
+            }
+            String id = one;
+            int level = 0;
+            int at = one.lastIndexOf('@');
+            if (at > 0) {
+                id = one.substring(0, at).trim();
+                try {
+                    level = Integer.parseInt(one.substring(at + 1).trim());
+                } catch (NumberFormatException ignored) {
+                    level = 0;
+                }
+            }
+            String name = enchantName(id);
+            if (name.isEmpty()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append(name);
+            if (level > 0) {
+                sb.append(' ').append(roman(level));
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 附魔注册名 → 客户端语言显示名；查不到就退回 id 的 path。
+     *
+     * <p>不走注册表：原版把附魔翻译键固定拼成 {@code enchantment.<命名空间>.<路径>}
+     * （例如 {@code minecraft:sharpness} → {@code enchantment.minecraft.sharpness}），
+     * 直接问语言表就够了，也省掉一次注册表查询可能带来的异常。
+     */
+    private static String enchantName(String enchantId) {
+        if (enchantId == null || enchantId.isEmpty()) {
+            return "";
+        }
+        String cached = ENCHANT_NAMES.get(enchantId);
+        if (cached != null) {
+            return cached;
+        }
+        String name = "";
+        int colon = enchantId.indexOf(':');
+        String namespace = colon > 0 ? enchantId.substring(0, colon) : "minecraft";
+        String path = colon > 0 ? enchantId.substring(colon + 1) : enchantId;
+        try {
+            String translated = Component.translatable("enchantment." + namespace + "."
+                    + path.replace('/', '.')).getString();
+            if (translated != null && !translated.isBlank() && !translated.startsWith("enchantment.")) {
+                name = translated;
+            }
+        } catch (Throwable ignored) {
+            // 语言表还没准备好 —— 下面退回可读的 path
+        }
+        if (name.isEmpty()) {
+            name = path.isEmpty() ? enchantId : path;
+        }
+        ENCHANT_NAMES.put(enchantId, name);
+        return name;
+    }
+
+    /** 等级 → 罗马数字（1→I、4→IV、5→V、10→X…），超出常规范围就退回阿拉伯数字 */
+    private static String roman(int level) {
+        if (level <= 0 || level > 3999) {
+            return String.valueOf(level);
+        }
+        int[] values = {1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1};
+        String[] symbols = {"M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"};
+        StringBuilder sb = new StringBuilder();
+        int left = level;
+        for (int i = 0; i < values.length && left > 0; i++) {
+            while (left >= values[i]) {
+                sb.append(symbols[i]);
+                left -= values[i];
+            }
+        }
+        return sb.toString();
+    }
+
     /** 物品显示名：客户端自己的语言优先，取不到才用快照里服务端给的名字 */
     private static String itemName(ClientSnapshot.Item it) {
         if (it == null) {
@@ -2250,11 +2508,29 @@ public class WarehouseScreen extends Screen {
                 "已下单：让搬运工给你取 " + amount + " 个 " + what);
     }
 
-    /** 名册指纹：名字 + 值守仓库 + 值守点 + 在不在岗。变了就重建控件（每行按钮跟着名单走） */
+    /**
+     * 搬运工给人看的名字（0.22.0 · 优化7）：设了自定义显示名就用它，否则用注册名。
+     *
+     * <p>只在「画文字 / 弹提示」时用；发给服务端的指令参数必须继续用注册名（{@code bot.name}），
+     * 因为名册、任务、值守都是以注册名为键的。查不到这个注册名（刚被删）时原样返回。
+     */
+    private String botLabel(String name) {
+        if (name == null || name.isEmpty()) {
+            return "";
+        }
+        for (ClientSnapshot.Bot b : ClientSnapshot.bots()) {
+            if (name.equals(b.name)) {
+                return b.shown();
+            }
+        }
+        return name;
+    }
+
+    /** 名册指纹：名字 + 显示名 + 值守仓库 + 值守点 + 在不在岗。变了就重建控件（每行按钮跟着名单走） */
     private String botSig() {
         StringBuilder sb = new StringBuilder();
         for (ClientSnapshot.Bot b : ClientSnapshot.bots()) {
-            sb.append(b.name).append('@').append(b.region).append('#').append(b.spot)
+            sb.append(b.name).append('/').append(b.display).append('@').append(b.region).append('#').append(b.spot)
                     .append(b.present ? '+' : '-').append(';');
         }
         return sb.toString();
@@ -2270,8 +2546,15 @@ public class WarehouseScreen extends Screen {
         return sb.toString();
     }
 
+    /**
+     * 边界按钮的文案：查的是**当前选中那个仓库**的开启状态（0.22.0 · 优化9）。
+     *
+     * <p>没选中具体仓库（「全部仓库」）时一律显示「显示边界」—— 按钮同时是禁用的，
+     * 文案只是个静态说明。
+     */
     private String borderLabel() {
-        return RegionBorder.isOn() ? "隐藏边界" : "显示边界";
+        String name = selectedRegion();
+        return !name.isEmpty() && RegionBorder.isOn(name) ? "隐藏边界" : "显示边界";
     }
 
     // ================================================================== 动作
@@ -2280,17 +2563,42 @@ public class WarehouseScreen extends Screen {
         void use(String name);
     }
 
-    private void withRegion(NameUser user) {
+    /**
+     * 只在**确实选中了一个具体仓库**时才执行（0.22.0 · 优化10）。
+     *
+     * <p>用于那些语义上必须点名一个仓库的操作：边界显示、扩建/缩小、并进新圈范围、删除仓库。
+     * 选中「全部仓库」时不再偷偷改成第一个仓库，而是提示玩家先去左栏选一个。
+     */
+    private void withOneRegion(NameUser user) {
         List<RegionCache.Entry> list = RegionCache.list();
         if (list.isEmpty()) {
             status = "暂无任何仓库。请先站到两个角上分别点击“点1”“点2”，填写名字再点击“新建仓库”。";
             return;
         }
-        if (sel < 0 || sel >= list.size()) {
-            sel = 0;
+        if (sel < 0) {
+            status = "请先在左栏选中一个具体仓库（当前是「全部仓库」）。";
+            return;
+        }
+        if (sel >= list.size()) {
+            sel = list.size() - 1;
         }
         RegionCache.Entry entry = list.get(sel);
-        RegionBorder.select(entry);
+        RegionBorder.touch(entry);   // 只是让边界用上最新坐标，绝不顺手打开
+        user.use(clean(entry.name));
+    }
+
+    /** 按语义取仓库名：选中「全部仓库」时给空串（服务端把空串当全部）。 */
+    private void withRegion(NameUser user) {
+        List<RegionCache.Entry> list = RegionCache.list();
+        if (list.isEmpty() || sel < 0) {
+            user.use("");
+            return;
+        }
+        if (sel >= list.size()) {
+            sel = list.size() - 1;
+        }
+        RegionCache.Entry entry = list.get(sel);
+        RegionBorder.touch(entry);
         user.use(clean(entry.name));
     }
 
@@ -2304,21 +2612,31 @@ public class WarehouseScreen extends Screen {
         withRegion(user);
     }
 
+    /**
+     * 开/关**当前选中仓库**的边界粒子（0.22.0 · 优化9：每个仓库各存一份开关）。
+     *
+     * <p>选中「全部仓库」时不能按仓库开边界，所以直接拒绝并提示先选一个具体仓库。
+     */
     private void toggleBorder() {
         List<RegionCache.Entry> list = RegionCache.list();
         if (list.isEmpty()) {
             status = "暂无任何仓库，没有边界可以显示。";
             return;
         }
-        if (sel < 0 || sel >= list.size()) {
-            sel = 0;
+        if (sel < 0) {
+            status = "请先在左栏选中一个具体仓库，边界是逐个仓库单独显示的。";
+            return;
+        }
+        if (sel >= list.size()) {
+            sel = list.size() - 1;
         }
         RegionCache.Entry entry = list.get(sel);
-        RegionBorder.select(entry);
-        boolean next = !RegionBorder.isOn();
-        RegionBorder.setOn(next);
-        status = next ? ("正在用发光粒子勾出 " + entry.name + " 的边界。切换维度后将不可见。")
-                : "已关闭边界粒子。";
+        RegionBorder.touch(entry);
+        boolean next = !RegionBorder.isOn(entry.name);
+        RegionBorder.toggle(entry.name, next);
+        status = next ? ("正在用发光粒子勾出 " + entry.name + " 的边界（其他仓库的开关不受影响）。切换维度后将不可见。")
+                : ("已关闭 " + entry.name + " 的边界粒子。");
+        rebuildWidgets();
     }
 
     private void run(String command, String note) {
@@ -2610,23 +2928,33 @@ public class WarehouseScreen extends Screen {
         }
         if (borderBtn != null) {
             borderBtn.setMessage(Component.literal(borderLabel()));
+            // 优化9/10：边界按仓库开关，选中项一变（含切到「全部仓库」）按钮状态就要跟着变
+            borderBtn.active = !selectedRegion().isEmpty();
         }
     }
 
+    /**
+     * 把选中项夹回合法范围（0.22.0 · 优化10）。
+     *
+     * <p>关键：{@code sel == -1} 是「全部仓库」，**必须原样保留** —— 仓库列表为空时也是 -1
+     * （旧代码在空列表时写回 0，于是「默认全部仓库」一有仓库就变成「默认选中第一个」）。
+     * 这里只夹两件事：{@code sel} 太大时收到最后一项、小于 -1 的脏值时回到 -1。
+     */
     private void clampSel() {
         List<RegionCache.Entry> list = RegionCache.list();
         if (list.isEmpty()) {
-            sel = 0;
+            sel = -1;
             scroll = 0;
             return;
         }
         if (sel >= list.size()) {
             sel = list.size() - 1;
         }
-        if (sel < 0) {
-            sel = 0;
+        if (sel < -1) {
+            sel = -1;
         }
-        int max = Math.max(0, list.size() - Math.max(1, rowsVisible(listBox, regionRowH)));
+        // 列表比真实仓库多一行：第 0 行是合成的「全部仓库」
+        int max = Math.max(0, list.size() + 1 - Math.max(1, rowsVisible(listBox, regionRowH)));
         scroll = Math.max(0, Math.min(scroll, max));
     }
 
@@ -2796,6 +3124,7 @@ public class WarehouseScreen extends Screen {
         if (this.font.width(label) > room) {
             String brief = switch (label) {
                 case "名册值守" -> "名册";
+                case "扩建/缩小" -> "扩建/缩";   // 少一个字，窄窗口下更容易整块显示
                 default -> label;
             };
             label = this.font.width(brief) <= room ? brief : fit(brief, room);
@@ -2860,18 +3189,21 @@ public class WarehouseScreen extends Screen {
         borderIn(g, listBox, 0xFF2A3342);
         int rows = Math.max(1, rowsVisible(listBox, regionRowH));
         if (listBox != null && !listBox.empty()) {
-            int max = Math.max(0, list.size() - rows);
+            // 0.22.0 · 优化10：列表第 0 行是合成的「全部仓库」（sel == -1），真实仓库是第 1..n 行
+            int total = list.size() + 1;
+            int max = Math.max(0, total - rows);
             scroll = Math.max(0, Math.min(scroll, max));
             clipped(g, listBox, gg -> {
                 for (int i = 0; i < rows; i++) {
                     int idx = scroll + i;
-                    if (idx >= list.size()) {
+                    if (idx >= total) {
                         break;
                     }
-                    RegionCache.Entry entry = list.get(idx);
+                    boolean all = idx == 0;
+                    RegionCache.Entry entry = all ? null : list.get(idx - 1);
                     R row = new R(listBox.x() + 2, listBox.y() + 2 + i * regionRowH, Math.max(0, listBox.w() - 4),
                             regionRowH - 2);
-                    boolean selected = idx == sel;
+                    boolean selected = all ? sel < 0 : idx - 1 == sel;
                     boolean hover = row.holds(mouseX, mouseY);
                     if (selected) {
                         fillIn(gg, row, 0xFF1D4E89);
@@ -2880,11 +3212,11 @@ public class WarehouseScreen extends Screen {
                     }
                     // 名字一行 + 详情最多两行：整块在行里垂直居中，每行各自水平居中（都不会越出行框）
                     int metaW = Math.max(0, row.w() - 12);
-                    List<String> meta = metaLines(entry, metaW);
+                    List<String> meta = all ? allRegionsMeta(total - 1) : metaLines(entry, metaW);
                     int blockH = LINE_H * (1 + meta.size());
                     int top = row.y() + Math.max(2, (row.h() - blockH) / 2);
                     textCenter(gg, new R(row.x() + 6, top, metaW, LINE_H),
-                            entry.name, selected ? 0xFFFFFFFF : 0xFFD5DEEA);
+                            all ? "全部仓库" : entry.name, selected ? 0xFFFFFFFF : 0xFFD5DEEA);
                     for (int k = 0; k < meta.size(); k++) {
                         textCenter(gg, new R(row.x() + 6, top + (k + 1) * LINE_H, metaW, LINE_H),
                                 meta.get(k), selected ? 0xFFD8E6F8 : 0xFF7C8CA1);
@@ -2900,9 +3232,9 @@ public class WarehouseScreen extends Screen {
                     }
                 }
             });
-            if (list.size() > rows) {
+            if (total > rows) {
                 textRight(g, captionRight,
-                        "滚轮 " + (scroll + 1) + "~" + Math.min(list.size(), scroll + rows) + " / " + list.size(),
+                        "滚轮 " + (scroll + 1) + "~" + Math.min(total, scroll + rows) + " / " + total,
                         0xFF6E7E93);
             }
         }
@@ -3351,7 +3683,8 @@ public class WarehouseScreen extends Screen {
             for (JsonObject it : items) {
                 String cat = QueryClient.str(it, "category");
                 lines.add("槽 " + QueryClient.num(it, "slot") + " · " + queryItemName(it)
-                        + " ×" + QueryClient.num(it, "count") + (cat.isEmpty() ? "" : " · " + cat));
+                        + " ×" + QueryClient.num(it, "count") + (cat.isEmpty() ? "" : " · " + cat)
+                        + slotMeta(it));
             }
         } else {
             lines.add("索引中不存在该容器，可能刚重新扫描过。");
@@ -3924,7 +4257,18 @@ public class WarehouseScreen extends Screen {
                                 "窗口过小：其余按钮已省略", "其余按钮已省略"), 0xFFE0B36A);
             }
         } else {
-            textCenter(g, r0, "（还没有仓库）", 0xFF7F8EA3);
+            // 优化10：sel == -1 是「全部仓库」，明确写出来（旧文案是「（还没有仓库）」，会误导）
+            if (list.isEmpty()) {
+                textCenter(g, r0, "（还没有仓库）", 0xFF7F8EA3);
+            } else {
+                textCenter(g, r0, "当前范围 全部仓库", 0xFFFFFFFF);
+                textCenter(g, new R(r0.x(), r0.y() + LINE_H, r0.w(), LINE_H),
+                        "左栏第 0 行 · 跨 " + list.size() + " 个仓库统计", 0xFFCFE0F5);
+                if (infoBlock.h() >= 3 * LINE_H + 2) {
+                    textCenter(g, new R(r0.x(), r0.y() + 2 * LINE_H, r0.w(), LINE_H),
+                            "边界显示 / 扩建 / 缩小需要指定单个仓库", 0xFF8FA0B8);
+                }
+            }
         }
     }
 
@@ -4031,7 +4375,7 @@ public class WarehouseScreen extends Screen {
         int visible = rowsVisible(rowsBox, rowH);
         int widestName = 0;
         for (ClientSnapshot.Bot b : bots) {
-            widestName = Math.max(widestName, this.font.width(b.name) + 2);
+            widestName = Math.max(widestName, this.font.width(b.shown()) + 2);
         }
         final int needName = widestName;
         clipped(g, rowsBox, gg -> {
@@ -4069,8 +4413,9 @@ public class WarehouseScreen extends Screen {
                     busyW = 0;
                 }
                 int x = text.x();
-                boolean nameClipped = this.font.width(bot.name) > nameW;
-                textIn(gg, new R(x, text.y() + 3, nameW, LINE_H), bot.name, 0xFFFFFFFF);
+                // 显示名（优化7）：设了就画自定义名，没设画注册名 —— 选中的判据仍然是注册名
+                boolean nameClipped = this.font.width(bot.shown()) > nameW;
+                textIn(gg, new R(x, text.y() + 3, nameW, LINE_H), bot.shown(), 0xFFFFFFFF);
                 x += nameW;
                 String reg = bot.region == null || bot.region.isEmpty()
                         ? (regW >= 72 ? "（没派仓库）" : "没派")
@@ -4096,7 +4441,7 @@ public class WarehouseScreen extends Screen {
         // 分配那一行的说明文字：说清楚「确定」会作用到谁身上
         if (assignLabel != null && !assignLabel.empty()) {
             textCenter(g, new R(assignLabel.x(), assignLabel.y(), assignLabel.w(), assignLabel.h()),
-                    pickBot.isEmpty() ? "先点一行选中搬运工" : "把「" + pickBot + "」派到",
+                    pickBot.isEmpty() ? "先点一行选中搬运工" : "把「" + botLabel(pickBot) + "」派到",
                     pickBot.isEmpty() ? 0xFFE0B36A : 0xFFCFE0F5);
         }
     }
@@ -4480,17 +4825,23 @@ public class WarehouseScreen extends Screen {
         if (ev.button() == 0 && tab == 0 && listBox != null && !listBox.empty()) {
             List<RegionCache.Entry> list = RegionCache.list();
             int rows = Math.max(1, rowsVisible(listBox, regionRowH));
+            int total = list.size() + 1;   // 第 0 行是合成的「全部仓库」
             for (int i = 0; i < rows; i++) {
                 int idx = scroll + i;
-                if (idx >= list.size()) {
+                if (idx >= total) {
                     break;
                 }
                 R row = new R(listBox.x() + 2, listBox.y() + 2 + i * regionRowH, Math.max(0, listBox.w() - 4),
                         regionRowH - 2);
                 if (row.holds(ev.x(), ev.y())) {
-                    sel = idx;
-                    RegionBorder.select(list.get(idx));
-                    // 换了仓库：四页要查的东西全变了（页码/滚动/详情都归零，再各查一次）
+                    // 优化10：点第 0 行 = 「全部仓库」（sel = -1），**不碰** RegionBorder —— 边界是逐个仓库的
+                    if (idx == 0) {
+                        sel = -1;
+                    } else {
+                        sel = idx - 1;
+                        RegionBorder.touch(list.get(sel));
+                    }
+                    // 换了范围：四页要查的东西全变了（页码/滚动/详情都归零，再各查一次）
                     itemPage = 1;
                     infoScroll = 0;
                     boxScroll = 0;
@@ -4658,7 +5009,8 @@ public class WarehouseScreen extends Screen {
             return true;
         }
         if (listBox != null && listBox.holds(x, y)) {
-            int max = Math.max(0, RegionCache.list().size() - Math.max(1, rowsVisible(listBox, regionRowH)));
+            // 行数 = 真实仓库 + 1（合成的「全部仓库」）
+            int max = Math.max(0, RegionCache.list().size() + 1 - Math.max(1, rowsVisible(listBox, regionRowH)));
             scroll = Math.max(0, Math.min(scroll + step, max));
             return true;
         }

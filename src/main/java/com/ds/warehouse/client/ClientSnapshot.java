@@ -77,6 +77,12 @@ public final class ClientSnapshot {
     /** 名册里的一个搬运工（面板「搬运工」页用） */
     public static final class Bot {
         public String name = "";
+        /**
+         * 自定义显示名（0.22.0 · 优化7）。空 = 没设置，界面一律退回 {@link #name}。
+         *
+         * <p>老服务端不发这个字段，解析后是空串，所以每次读都要判空 —— 用 {@link #shown()}。
+         */
+        public String display = "";
         /** 值守的仓库名；空 = 没指定 */
         public String region = "";
         /** 自定义值守点 "x,y,z"；空 = 自动 */
@@ -85,6 +91,16 @@ public final class ClientSnapshot {
         public String busy = "";
         /** 现在在世​界里（在岗）。面板的按钮据此显示「上岗」还是「收回」 */
         public boolean present;
+
+        /**
+         * 画给人看的名字：设了自定义显示名就用它，否则用注册名。
+         *
+         * <p><b>只用于显示</b>：指令、任务、按钮回调、以名字为键的查表一律继续用
+         * {@link #name}（注册名）—— 那是身份，不能换。
+         */
+        public String shown() {
+            return display == null || display.isEmpty() ? name : display;
+        }
     }
 
     /**

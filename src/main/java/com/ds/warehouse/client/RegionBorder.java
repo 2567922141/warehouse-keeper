@@ -1,7 +1,10 @@
 package com.ds.warehouse.client;
 
 import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.particle.Particle;
 import net.minecraft.core.particles.ParticleTypes;
@@ -18,6 +21,11 @@ import net.minecraft.core.particles.ParticleTypes;
  *   <li><b>全高度仓库只画脚下那一圈</b>：全高度意味着「整根柱子都算」，再画 384 格高的竖线只会糊满整个屏幕、还容易让人以为区域超出了范围。限定高度的仓库才画完整体块。</li>
  *   <li><b>开界面 / 暂停时把粒子收掉</b>：粒子是我们自己 add 进去的，句柄留着，所以能一条不剩地 remove()。否则单机暂停时它们会冻在半空，透过半透明面板看就像面板边框画歪了。</li>
  * </ul>
+ *
+ * <p><b>0.22.0 · 优化9：按仓库分别控制。</b>以前这里只有一个 {@code region} + 一个 {@code on}
+ * 布尔（进程级单例），面板一换选中仓库就把边界「搬」过去 —— 所以看起来像「开一个仓库，
+ * 其他仓库也一起开了」。现在状态是 {@code 名字 → 区域} 的表，每个仓库各自开关，可以同时显示多个；
+ * 仍然<b>纯客户端内存态</b>：不落盘、不走网络，退出游戏就没了。
  */
 public final class RegionBorder {
 
@@ -33,47 +41,120 @@ public final class RegionBorder {
     /** 我们自己撒出去的粒子（用于开界面/暂停时立刻回收）。 */
     private static final List<Particle> LIVE = new ArrayList<>();
 
-    private static RegionCache.Entry region;
-    private static boolean on;
+    /**
+     * 开着边界的仓库：{@code 区域名 → 区域}。
+     *
+     * <p>用 {@link LinkedHashMap} 是为了让撒粒子的顺序稳定（同一批区域每 8 tick 的观感一致）。
+     * 值必须每次都换成 {@link RegionCache} 最新的那个 {@code Entry}：{@code RegionCache.refresh()}
+     * 每次都会重建 Entry 对象，旧对象里的坐标可能已经过期（仓库被扩建/缩小过）。
+     */
+    private static final Map<String, RegionCache.Entry> ENABLED = new LinkedHashMap<>();
+
     private static int counter;
 
     private RegionBorder() {
     }
 
-    public static boolean isOn() {
-        return on;
+    /** 这个仓库的边界现在开着吗（{@code name} 为空 = 没有具体仓库 ⇒ false）。 */
+    public static boolean isOn(String name) {
+        return name != null && !name.isEmpty() && ENABLED.containsKey(name);
     }
 
-    public static RegionCache.Entry region() {
-        return region;
+    /** 当前开着边界的仓库名（按开启顺序，只读快照）。 */
+    public static List<String> enabledNames() {
+        return List.copyOf(ENABLED.keySet());
     }
 
-    public static void select(RegionCache.Entry entry) {
-        region = entry;
-    }
-
-    public static void setOn(boolean value) {
-        on = value;
-        counter = 0;
-        if (!value) {
+    /** 打开 / 关闭某个仓库的边界；重复设置同一个值是无害的。 */
+    public static void toggle(String name, boolean value) {
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+        boolean changed;
+        if (value) {
+            RegionCache.Entry entry = find(name);
+            if (entry == null) {
+                // 列表里已经没有这个仓库了（刚被删）：直接忽略，别往表里塞一个空壳
+                changed = ENABLED.remove(name) != null;
+            } else {
+                ENABLED.put(name, entry);
+                changed = true;
+            }
+        } else {
+            changed = ENABLED.remove(name) != null;
+        }
+        if (changed) {
+            counter = 0;
+            // 立刻把已撒出去的粒子收掉：关掉的那个仓库的线不该在屏幕上多留几秒；
+            // 还开着的仓库下一个 tick 就会重新撒出来（counter 归零 ⇒ 立刻重画）。
             clearLive();
         }
     }
 
-    /** 选中区域没了（被删掉）就把边界关掉。 */
+    /**
+     * 记录「面板当前显示的仓库」。
+     *
+     * <p>只做一件事：如果这个仓库的边界正开着，就把表里那份换成最新的 {@code Entry}
+     * （区域被改过之后坐标要跟着更新）。<b>不会顺手把没开的仓库打开</b> ——
+     * 「点一下列表就点亮所有边框」正是玩家反馈的那个毛病。
+     *
+     * @return 传进来的 entry（便于链式使用）
+     */
+    public static RegionCache.Entry touch(RegionCache.Entry entry) {
+        if (entry == null || entry.name == null || entry.name.isEmpty()) {
+            return entry;
+        }
+        if (ENABLED.containsKey(entry.name)) {
+            ENABLED.put(entry.name, entry);
+        }
+        return entry;
+    }
+
+    /** {@link #touch} 的旧名字（调用方语义没变：只是「现在在看哪个仓库」）。 */
+    public static void select(RegionCache.Entry entry) {
+        touch(entry);
+    }
+
+    /**
+     * 当前显示的仓库（兼容旧调用：取表里第一个）。
+     *
+     * @deprecated 状态已经不是一个「当前区域」了，请用 {@link #enabledNames()} / {@link #isOn(String)}。
+     */
+    @Deprecated
+    public static RegionCache.Entry region() {
+        for (RegionCache.Entry entry : ENABLED.values()) {
+            return entry;
+        }
+        return null;
+    }
+
+    /** 区域被删掉的仓库从表里remove（名字还在 RegionCache.list() 里的顺手换成最新对象）。 */
     public static void validate() {
-        if (region == null) {
+        if (ENABLED.isEmpty()) {
             return;
         }
+        Map<String, RegionCache.Entry> latest = new LinkedHashMap<>();
         for (RegionCache.Entry entry : RegionCache.list()) {
-            if (entry == region || (entry.name != null && entry.name.equals(region.name))) {
-                region = entry;
-                return;
+            if (entry != null && entry.name != null && !entry.name.isEmpty()) {
+                latest.put(entry.name, entry);
             }
         }
-        region = null;
-        on = false;
-        clearLive();
+        boolean removed = false;
+        Iterator<Map.Entry<String, RegionCache.Entry>> it = ENABLED.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, RegionCache.Entry> e = it.next();
+            RegionCache.Entry fresh = latest.get(e.getKey());
+            if (fresh == null) {
+                it.remove();
+                removed = true;
+            } else if (fresh != e.getValue()) {
+                e.setValue(fresh);
+            }
+        }
+        if (removed) {
+            counter = 0;
+            clearLive();
+        }
     }
 
     public static void clientTick() {
@@ -90,7 +171,7 @@ public final class RegionBorder {
             clearLive();
             return;
         }
-        if (!on || region == null) {
+        if (ENABLED.isEmpty()) {
             clearLive();
             return;
         }
@@ -99,11 +180,23 @@ public final class RegionBorder {
             return;
         }
         String here = mc.level.dimension().identifier().toString();
-        if (!here.equals(region.dimension)) {
-            clearLive();
-            return;
+        boolean any = false;
+        // 逐个仓库画：粒子已经按玩家半径裁剪过，多开几个的代价与一个仓库同量级
+        for (RegionCache.Entry entry : ENABLED.values()) {
+            if (entry == null || !here.equals(entry.dimension)) {
+                continue;
+            }
+            any = true;
+            draw(mc, entry);
         }
+        if (!any) {
+            // 开着的仓库全在别的维度：把残留粒子收掉（但**不清空**表，回到那个维度还会自己亮）
+            clearLive();
+        }
+    }
 
+    /** 画一个仓库的边界（原来写在 clientTick 里的那一段，原样搬过来）。 */
+    private static void draw(Minecraft mc, RegionCache.Entry region) {
         double x0 = region.minX();
         double z0 = region.minZ();
         double x1 = region.maxX() + 1.0;
@@ -128,6 +221,16 @@ public final class RegionBorder {
             rect(mc, x0, x1, z0, z1, yd0, px, py, pz);
             rect(mc, x0, x1, z0, z1, yd1, px, py, pz);
         }
+    }
+
+    /** 按名字在 {@link RegionCache} 里找最新的一份。 */
+    private static RegionCache.Entry find(String name) {
+        for (RegionCache.Entry entry : RegionCache.list()) {
+            if (entry != null && name.equals(entry.name)) {
+                return entry;
+            }
+        }
+        return null;
     }
 
     /** 一条竖边。 */

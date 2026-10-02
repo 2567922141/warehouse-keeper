@@ -507,9 +507,12 @@ public final class ContainerTagBar {
         int guiY = (screenH - guiH) / 2;
 
         // 分类清单是自绘下拉，不占 TagBarLayout 的格子 ⇒ mainCount 恒为 0，
-        // 布局退化成「标签：… + 自动分类 + 暂存 + 清除标签」四个按钮
+        // 布局退化成「标签：… + 自动分类 + 暂存 + 清除标签」四个按钮。
+        // BUG1：停靠偏好（面板「维护」页里那个循环按钮，存客户端 config）在这里读进来 ——
+        // TagBarLayout 是纯几何类（不 import Minecraft/Gson），所以由调用方把偏好与界面尺寸传进去；
+        // auto + 界面尺寸 ≤ 1 时它会先试左侧（窗口逻辑宽度大 ⇒ JEI 面板占着箱子右边）。
         TagBarLayout.Plan plan = TagBarLayout.plan(screenW, screenH, guiX, guiY, guiW, guiH,
-                0, holder.extras.size());
+                0, holder.extras.size(), ClientPrefs.dock(), mc.getWindow().getGuiScale());
         if (plan.mode == TagBarLayout.Mode.HIDDEN) {
             hide(holder);
             return;

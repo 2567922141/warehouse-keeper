@@ -5,6 +5,7 @@ import com.ds.warehouse.index.ContainerRecord;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.Scanner;
 import com.ds.warehouse.index.WarehouseIndex;
+import com.ds.warehouse.util.Audit;
 import com.ds.warehouse.util.Categories;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -309,6 +310,133 @@ public final class ContainerTags {
         return t;
     }
 
+    /**
+     * 把一个键上的标签挪到另一个键。
+     *
+     * <p>用于「双联箱被拆掉一半」：标签本来按这一对的正式坐标存，另一半没了以后
+     * 活下来的那半坐标变了，标签要跟着走，否则玩家再点它会显示「未设置」。
+     *
+     * <p>原键没有标签时什么都不做；新键已经有标签时不再像以前那样把原键这条就地丢掉，
+     * 而是按与拼箱合并同一套优先级（暂存 &gt; 手动 &gt; 自动，同档比时间）并成一条并写审计 ——
+     * 见审查发现 7。
+     *
+     * @return true = 真的搬走/并掉了一条
+     */
+    public static boolean rekey(String from, String to) {
+        if (from == null || to == null || from.equals(to)) {
+            return false;
+        }
+        Tag t = MAP.get(from);
+        if (t == null) {
+            return false;
+        }
+        if (!MAP.containsKey(to)) {
+            MAP.remove(from);
+            MAP.put(to, t);
+            dirty = true;
+            return true;
+        }
+        mergeTwo(to, from, "拆箱挪键：把 " + from + " 上的标签并进 " + to);
+        return true;
+    }
+
+    /**
+     * 把「刚拼成 / 刚拆开的双联箱」两半上的标签并到同一个归一化键上（BUG3）。
+     *
+     * <p>标签键是<b>写入那一刻</b>按 {@link Scanner#canonical} 算出来的：两个独立箱子各贴过标签，
+     * 拼成大箱子以后正式坐标变成坐标较小的那一半，另一条就成了孤儿键 —— 而客户端查标签是
+     * 「本坐标精确匹配 + 四邻格兜底」，于是两半各显示一种分类。
+     *
+     * <p>两边都有标签时的优先级（按计划定案）：<b>暂存 &gt; 手动档 &gt; 自动档</b>；
+     * 同档比 {@code setAt}（后来贴的胜）；档位也一样时以坐标较小的那一半为主。
+     * 输的那条不是静默丢掉：赢家缺的另一个档位分类会补进来，并写一行审计。
+     * （这是「绝不自动删标签」的唯一例外：消失的只是同一只大箱子上的重复标签，
+     * 信息已经并进留下的那一条。）
+     *
+     * @param dim 维度 id
+     * @param a   双联箱的一半
+     * @param b   双联箱的另一半
+     * @return 被并掉的那个键；没有可并的返回 null
+     */
+    public static String mergePair(String dim, BlockPos a, BlockPos b) {
+        return mergePair(dim, a, b, null);
+    }
+
+    /**
+     * @param staleKey 直接指定「孤儿键」的原始字符串，给键格式不规范的历史数据用；null = 按坐标算
+     */
+    private static String mergePair(String dim, BlockPos a, BlockPos b, String staleKey) {
+        if (dim == null || a == null || b == null) {
+            return null;
+        }
+        BlockPos canon = a.compareTo(b) <= 0 ? a : b;
+        BlockPos other = canon.equals(a) ? b : a;
+        String key = WarehouseIndex.key(dim, canon);
+        String stale = staleKey != null ? staleKey : WarehouseIndex.key(dim, other);
+        if (key.equals(stale)) {
+            return null;
+        }
+        if (MAP.get(stale) == null) {
+            // 另一半本来就没标签：这是最常见的情况，什么都不用做
+            return null;
+        }
+        mergeTwo(key, stale, "双联箱合并：把 " + coord(other) + " 上的标签并进 " + coord(canon));
+        return stale;
+    }
+
+    /**
+     * 把 {@code stale} 这条标签并进 {@code key}：只有 stale 有标签就搬键；两边都有就按
+     * 「暂存 &gt; 手动 &gt; 自动，同档比 {@code setAt}」定胜负，输家那个档位的分类补进赢家
+     * （玩家贴过的分类不因为合并而丢），并写一行审计。
+     *
+     * <p>拼箱合并（{@link #mergePair}）与拆箱挪键（{@link #rekey}）共用这一段，免得两条路的优先级不一致。
+     */
+    private static void mergeTwo(String key, String stale, String what) {
+        Tag drop = MAP.get(stale);
+        if (drop == null) {
+            return;
+        }
+        Tag keep = MAP.get(key);
+        if (keep == null) {
+            MAP.remove(stale);
+            MAP.put(key, drop);
+            dirty = true;
+            return;
+        }
+        boolean dropWins = wins(drop, keep);
+        Tag win = dropWins ? drop : keep;
+        Tag lose = dropWins ? keep : drop;
+        // 胜负只决定「哪一条生效」；另一条那个档位的分类还留着，别把玩家贴过的分类直接扔掉
+        if (win.manualCategory == null || win.manualCategory.isEmpty()) {
+            win.manualCategory = lose.manualCategory;
+        }
+        if (win.autoCategory == null || win.autoCategory.isEmpty()) {
+            win.autoCategory = lose.autoCategory;
+        }
+        MAP.remove(stale);
+        MAP.put(key, win);
+        dirty = true;
+        Audit.add("系统", "改标签", what + "（暂存 > 手动 > 自动，同档比时间）");
+    }
+
+    /** 合并优先级：暂存 > 手动档 > 自动档；同档比 setAt（后来贴的胜） */
+    private static boolean wins(Tag candidate, Tag current) {
+        int c = rank(candidate);
+        int k = rank(current);
+        return c != k ? c > k : candidate.setAt > current.setAt;
+    }
+
+    private static int rank(Tag t) {
+        if (t.staging) {
+            return 3;
+        }
+        return t.isAutoMode() ? 1 : 2;
+    }
+
+    private static String coord(BlockPos pos) {
+        return pos.getX() + " " + pos.getY() + " " + pos.getZ();
+    }
+
     /** 清除标签；清完两条分类都没有、也不暂存 ⇒ 直接把记录删掉（保持文件干净） */
     public static boolean clear(String key) {
         Tag t = MAP.get(key);
@@ -329,8 +457,8 @@ public final class ContainerTags {
      * 修一遍标签键：
      * <ul>
      *   <li>箱子已经没了 ⇒ 删掉这条标签（只在玩家明确要求时调用，绝不自动删）</li>
-     *   <li>箱子还在、但归一化坐标变了（后来并成/拆成双联箱）⇒ 把标签挪到新键；
-     *       新键已经有标签时保留新键那条，删掉这条历史残留</li>
+     *   <li>箱子还在、但归一化坐标变了（后来并成/拆成双联箱）⇒ 走 {@link #mergePair} 把标签并到新键：
+     *       暂存 &gt; 手动档 &gt; 自动档，同档比贴标签时间，两边都不会被静默丢掉（并写一行审计）</li>
      *   <li>区块没加载 ⇒ 什么都不断言，原样留着</li>
      * </ul>
      *
@@ -361,14 +489,16 @@ public final class ContainerTags {
             if (canon.equals(s.pos())) {
                 continue;
             }
+            // 归一化坐标变了（后来并成/拆成双联箱）：走 mergePair，优先级与审计都跟扫描那条路一致。
+            // 这里把条目自己的键原样交给它（历史数据里的键格式可能跟 WarehouseIndex.key 不一致）
             String newKey = WarehouseIndex.key(s.dimension(), canon);
-            MAP.remove(e.getKey());
-            dirty = true;
-            if (MAP.containsKey(newKey)) {
-                dead++; // 新键已经有标签了，这条是历史残留
-            } else {
-                MAP.put(newKey, e.getValue());
-                moved++;
+            boolean occupied = MAP.containsKey(newKey) && !newKey.equals(e.getKey());
+            if (mergePair(s.dimension(), s.pos(), canon, e.getKey()) != null) {
+                if (occupied) {
+                    dead++; // 新键本来就有标签，这条是历史残留（并进去时按优先级定了胜负）
+                } else {
+                    moved++;
+                }
             }
         }
         return new int[] { moved, dead };

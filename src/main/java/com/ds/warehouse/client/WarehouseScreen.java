@@ -1170,7 +1170,7 @@ public class WarehouseScreen extends Screen {
         R row = gridRowFromBottom(0);
         if (admin) {
             btn("扫描仓库", gridLeft(row), b -> withRegionOrAll(name ->
-                    run(name.isEmpty() ? "warehouse scan" : "warehouse scan " + name, "已让游戏开始扫描")));
+                    run(name.isEmpty() ? "warehouse scan" : "warehouse scan " + q(name), "已让游戏开始扫描")));
             borderBtn = btn(borderLabel(), gridRight(row), b -> toggleBorder());
         } else {
             borderBtn = btn(borderLabel(), row, b -> toggleBorder());
@@ -1190,17 +1190,17 @@ public class WarehouseScreen extends Screen {
         nameBox.setMaxLength(24);
         nameBox.setValue(nameText);
         rememberHint(nameBox, hintFor(nameW,
-                "新仓库名字（字母数字下划线）", "新仓库名字（字母数字）", "新仓库名字", "名字"));
+                "新仓库名字（支持中文）", "新仓库名字（可中文）", "新仓库名字", "名字"));
         nameBox.setResponder(v -> nameText = v);
         addRenderableWidget(nameBox);
         btn("新建仓库", new R(row.right() - Math.max(60, row.w() - nameW - GAP), row.y(),
                 Math.max(60, row.w() - nameW - GAP), row.h()), b -> {
                     String name = clean(nameText);
                     if (name.isEmpty()) {
-                        status = "请先在上方输入框中填写仓库名字（字母/数字/下划线），再点击“新建仓库”。";
+                        status = "请先在上方输入框中填写仓库名字（支持中文；名字里有空格也可以），再点击“新建仓库”。";
                         return;
                     }
-                    run("warehouse region save " + name, "已按你当前设置的点1/点2 建了仓库 " + name);
+                    run("warehouse region save " + q(name), "已按你当前设置的点1/点2 建了仓库 " + name);
                 });
         if (rows > 1) {
             R row0 = gridRowFromBottom(1);
@@ -1231,19 +1231,19 @@ public class WarehouseScreen extends Screen {
         addRenderableWidget(countBox);
         btn("扩建", new R(row.right() - expandW, row.y(), expandW, row.h()), b -> withRegion(name -> {
             int amount = parseCount();
-            run("warehouse region grow " + name + " " + DIR_KEYS[dir] + " " + amount,
+            run("warehouse region grow " + q(name) + " " + DIR_KEYS[dir] + " " + amount,
                     "已把仓库 " + name + " 朝" + DIR_NAMES[dir] + "扩 " + amount + " 格");
         }));
         if (rows > 1) {
             btn("扩建至我当前所站位置", gridRowFromBottom(1), b ->
-                    withRegion(name -> run("warehouse region grow " + name,
+                    withRegion(name -> run("warehouse region grow " + q(name),
                             "已把仓库 " + name + " 扩建至你的位置")));
         }
         if (rows > 2) {
             btn("并进新圈范围", gridRowFromBottom(2), b -> withRegion(name ->
                     ask("并进新圈范围", "将把你新圈定的范围并入仓库「" + name + "」，此仓库的范围会变大"
                             + "（箱子内的物品不动，仅定义发生变化）。确定要继续吗？",
-                            () -> run("warehouse region merge " + name, "已把你圈的新范围并进 " + name))));
+                            () -> run("warehouse region merge " + q(name), "已把你圈的新范围并进 " + name))));
         }
     }
 
@@ -1379,14 +1379,14 @@ public class WarehouseScreen extends Screen {
         int rows = gridRows;
         R row = gridRowFromBottom(0);
         btn("重新扫描", gridLeft(row), b -> withRegionOrAll(name ->
-                run(name.isEmpty() ? "warehouse scan" : "warehouse scan " + name, "已让游戏开始扫描")));
+                run(name.isEmpty() ? "warehouse scan" : "warehouse scan " + q(name), "已让游戏开始扫描")));
         borderBtn = btn(borderLabel(), gridRight(row), b -> toggleBorder());
         if (rows > 1) {
             R up = gridRowFromBottom(1);
             btn("删除仓库", up, b -> withRegion(name ->
                     ask("删除仓库「" + name + "」", "将仅删除此仓库的「范围定义」：箱子及其中的物品不会被改动，"
                             + "搬运工亦不会操作它们。删除后可重新圈定范围再次创建。确定要删除吗？",
-                            () -> run("warehouse region remove " + name, "已删除仓库 " + name))));
+                            () -> run("warehouse region remove " + q(name), "已删除仓库 " + name))));
         }
     }
 
@@ -1507,16 +1507,16 @@ public class WarehouseScreen extends Screen {
             ClientSnapshot.Bot bot = bots.get(idx);
             String name = bot.name;
             btn(pickFit(Math.max(8, b[0].w() - 6), "设值守点", "设点位", "点位"), b[0], x ->
-                    run("warehouse bot spot " + name, "已把「" + name + "」值守点设为你的当前位置"));
+                    run("warehouse bot spot " + q(name), "已把「" + name + "」值守点设为你的当前位置"));
             btn(bot.present ? "收回" : "上岗", b[1], x ->
-                    run(bot.present ? "warehouse bot kill " + name : "warehouse bot spawn " + name,
+                    run(bot.present ? "warehouse bot kill " + q(name) : "warehouse bot spawn " + q(name),
                             bot.present ? "已让「" + name + "」退场" : "已让「" + name + "」上岗"));
             btn("停止", b[2], x ->
-                    run("warehouse bot stop " + name, "已让「" + name + "」停止当前任务"));
+                    run("warehouse bot stop " + q(name), "已让「" + name + "」停止当前任务"));
             btn("删除", b[3], x -> ask("删除搬运工「" + name + "」",
                     "将从名册里删掉「" + name + "」：它身上的物品会先收回箱子里，然后这个人形从世界里消失。"
                             + "此操作不可撤销（要用可以再点「＋新增搬运工」）。确定删除吗？",
-                    () -> run("warehouse bot remove " + name, "已删除搬运工「" + name + "」")));
+                    () -> run("warehouse bot remove " + q(name), "已删除搬运工「" + name + "」")));
         }
 
         // 分配那一行：选择框（点开仓库清单）+ 确定
@@ -1549,7 +1549,7 @@ public class WarehouseScreen extends Screen {
                 }
                 pickOpen = false;
                 layoutAssignList();
-                run("warehouse bot assign " + pickBot + " " + pickRegion,
+                run("warehouse bot assign " + q(pickBot) + " " + q(pickRegion),
                         "已让「" + pickBot + "」值守仓库 " + pickRegion);
             });
         }
@@ -1604,13 +1604,13 @@ public class WarehouseScreen extends Screen {
             ClientSnapshot.Account acc = accounts.get(idx);
             String name = acc.name;
             btn(acc.take ? "取货 开" : "取货 关", b[0], x ->
-                    run("warehouse user perm " + name + " take " + (acc.take ? "off" : "on"),
+                    run("warehouse user perm " + q(name) + " take " + (acc.take ? "off" : "on"),
                             "已" + (acc.take ? "关闭" : "开启") + "「" + name + "」的取货权限"));
             btn(acc.bot ? "指挥 开" : "指挥 关", b[1], x ->
-                    run("warehouse user perm " + name + " bot " + (acc.bot ? "off" : "on"),
+                    run("warehouse user perm " + q(name) + " bot " + (acc.bot ? "off" : "on"),
                             "已" + (acc.bot ? "关闭" : "开启") + "「" + name + "」的指挥搬运工权限"));
             btn(acc.tidy ? "整理 开" : "整理 关", b[2], x ->
-                    run("warehouse user perm " + name + " tidy " + (acc.tidy ? "off" : "on"),
+                    run("warehouse user perm " + q(name) + " tidy " + (acc.tidy ? "off" : "on"),
                             "已" + (acc.tidy ? "关闭" : "开启") + "「" + name + "」的整理仓库权限"));
         }
     }
@@ -1870,7 +1870,7 @@ public class WarehouseScreen extends Screen {
      */
     private void runTask(String base, String region, String what) {
         if (!region.isEmpty()) {
-            run(base + " " + region, "已让搬运工开始" + what + "（" + region + "）");
+            run(base + " " + q(region), "已让搬运工开始" + what + "（" + region + "）");
             return;
         }
         List<String> targets = botRegions();
@@ -1879,7 +1879,7 @@ public class WarehouseScreen extends Screen {
             return;
         }
         for (String r : targets) {
-            run(base + " " + r, "已让搬运工开始" + what + "（" + r + "）");
+            run(base + " " + q(r), "已让搬运工开始" + what + "（" + r + "）");
         }
     }
 
@@ -2466,7 +2466,18 @@ public class WarehouseScreen extends Screen {
         }
     }
 
-    /** 区域名走 brigadier 的 word()，只允许字母数字下划线。 */
+    /**
+     * 名字整理：剥掉会破坏指令文本本身的字符，其余**原样保留**（含中文）。
+     *
+     * <p>以前这里只留 {@code [A-Za-z0-9_]}（因为 brigadier 的 {@code word()} 只认这些），
+     * 结果中文仓库名会被整段剥成空串：既建不了中文仓库，服务端推下来的中文名在界面上
+     * 也会变成空白、甚至被归进同一个 key。现在服务端用的是自定义的 {@code NameArgument}
+     * （不带引号读到空白为止、带引号支持空格，见 {@code command/NameArgument.java}），
+     * 所以这里只去掉引号和换行这类会截断指令的字符。
+     *
+     * <p>反过来，服务端发过来的名字（{@code entry.name} 等）也走这个函数，
+     * 剥字符会让显示与指令都对不上，务必保持「不改内容」。
+     */
     private static String clean(String raw) {
         if (raw == null) {
             return "";
@@ -2474,11 +2485,24 @@ public class WarehouseScreen extends Screen {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < raw.length(); i++) {
             char c = raw.charAt(i);
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
-                sb.append(c);
+            if (c == '\\' || c == '"' || c == '\n' || c == '\r' || c == '\t') {
+                continue;
             }
+            sb.append(c);
         }
-        return sb.toString();
+        return sb.toString().trim();
+    }
+
+    /**
+     * 把名字拼进指令文本：含空格时加引号（服务端 {@code NameArgument} 见到引号会整段读）。
+     *
+     * <p>{@link #clean(String)} 已经把引号剥掉了，所以这里只要决定加不加引号。
+     */
+    private static String q(String name) {
+        if (name == null) {
+            return "\"\"";
+        }
+        return name.indexOf(' ') >= 0 ? "\"" + name + "\"" : name;
     }
 
     // ------------------------------------------------------------------ 物品列表（含搜索过滤）

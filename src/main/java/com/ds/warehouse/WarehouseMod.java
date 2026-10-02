@@ -1,5 +1,6 @@
 package com.ds.warehouse;
 
+import com.ds.warehouse.command.NameArgumentInfo;
 import com.ds.warehouse.command.WarehouseCommand;
 import com.ds.warehouse.config.AppConfig;
 import com.ds.warehouse.config.ContainerTags;
@@ -79,6 +80,10 @@ public class WarehouseMod implements ModInitializer {
         // 注意：仓库区域、搬运工名册、物品归位记忆、索引都是**按存档**的，
         // 必须等进了存档（SERVER_STARTED）知道是哪个世界之后才能读，见下面的 WorldStore.enter
         AppConfig.load();
+
+        // 中文名字参数类型（仓库名/假人名）：自定义参数类型要在指令树构建之前注册，
+        // 否则服务端把指令树同步给客户端时找不到它的序列化器（见 command/NameArgument.java）
+        NameArgumentInfo.register();
 
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
                 WarehouseCommand.register(dispatcher));

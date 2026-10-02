@@ -31,7 +31,8 @@ import java.util.List;
  *   2. 默认用 level.getChunk(cx, cz, ChunkStatus.FULL, false) —— 最后一个 false 表示
  *      **不强制加载区块**。没加载的区块直接计入 skippedChunks，绝不因为扫描而
  *      把整个仓库区域从磁盘拉起来。
- *   3. 取 LevelChunk.getBlockEntities().values()，区域内 + instanceof Container 过滤。
+ *   3. 取 LevelChunk.getBlockEntities().values()，区域内 + {@link Containers#isWarehouseContainer}
+ *      过滤（方块实体是 Container、且方块 id 不在排除表 —— 默认排除雕纹书架与 26.2 的架子）。
  *   4. 分时执行：每 tick 最多占用 BUDGET_NANOS，剩下的留给服务器 tick。
  *
  * 「扫描时临时强制加载区块」开关（settings.json 的 scanForceLoadChunks，默认开）：
@@ -43,7 +44,8 @@ import java.util.List;
  *       就算失败，票据也只在内存里，服务器重启即彻底消失。
  *     - 上限 MAX_FORCE_LOAD 个区块，超过后退化成「只扫已加载的区块」并打日志。
  *
- * 兼容性：唯一的「模组适配层」就是 `instanceof Container` + `getContainerSize()`。
+ * 兼容性：唯一的「模组适配层」就是 {@code instanceof Container} + {@code getContainerSize()}
+ * （由 {@link Containers} 统一判定「算不算仓库容器」）。
  * 原版箱子、Iron Chests 的 126 格大箱子、其它模组的容器全都自动覆盖，无需特判。
  */
 public final class Scanner {
@@ -320,9 +322,14 @@ public final class Scanner {
      */
     public static SlotMap mapOf(ServerLevel level, BlockPos p) {
         level.getChunk(p.getX() >> 4, p.getZ() >> 4, ChunkStatus.FULL, true);
-        if (!(level.getBlockEntity(p) instanceof Container c)) {
+        BlockEntity self = level.getBlockEntity(p);
+        // 「算不算仓库容器」只有 Containers 一个判据：被排除的方块（雕纹书架 / 架子）在这里就当作够不着。
+        // 该判据成立时方块实体必然是 Container，直接转即可（不必再问一次 instanceof —— 那会多一次
+        // getBlockEntity 读取）。
+        if (!Containers.isWarehouseContainer(level, p, self)) {
             return null;
         }
+        Container c = (Container) self;
         int n1 = c.getContainerSize();
         BlockPos other = partnerLoaded(level, p);
         if (other != null && level.getBlockEntity(other) instanceof Container c2) {
@@ -527,7 +534,8 @@ public final class Scanner {
                 if (!region.contains(p)) {
                     continue;
                 }
-                if (!(be instanceof Container container)) {
+                // 「算不算仓库容器」只有 Containers 一个判据：被排除的方块（雕纹书架 / 架子）不建记录
+                if (!Containers.isWarehouseContainer(level, p, be) || !(be instanceof Container container)) {
                     continue;
                 }
                 // 原版「两个箱子拼成一个大箱子」，在方块实体层面是两个各 27 格的箱子；

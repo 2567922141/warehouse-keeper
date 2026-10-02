@@ -169,7 +169,7 @@ public final class SnapshotSync {
                 continue;
             }
             sb.append("T:").append(en.getKey()).append('=').append(tag.staging ? 'S' : '-')
-                    .append(tag.isAutoMode() ? 'A' : 'M').append('#').append(tag.effectiveCategory()).append('|');
+                    .append(tag.isAutoMode() ? 'A' : 'M').append('#').append(catKey(tag)).append('|');
         }
         for (Bots.Entry e : Bots.list()) {
             sb.append(e.name).append('@').append(e.region == null ? "" : e.region)
@@ -183,6 +183,24 @@ public final class SnapshotSync {
                     .append(a.tidy() ? '1' : '0').append(';');
         }
         return sb.toString();
+    }
+
+    /**
+     * 标签上的类目 → 规范的类目**键**（签名与快照共用一份口径）。
+     *
+     * <p>标签里存的可能是创造栏页签键（新）、旧中文类目名（父类）或什么都没有。统一过一遍
+     * {@link Categories#resolve}：认得出就换成规范键；认不出、或本来就是旧父类名（旧名是合法输入，
+     * 代表「它原来管的那一片」）就原样留着 —— 服务端匹配靠 {@code Categories.matches} 展开子类。
+     *
+     * <p>返回空串表示「未贴标签 / 暂存」。**协议字段 {@code TagDto.category} 的语义没有变**，仍是键。
+     */
+    private static String catKey(ContainerTags.Tag tag) {
+        String raw = tag.effectiveCategory();
+        if (raw == null || raw.isEmpty()) {
+            return "";
+        }
+        String resolved = Categories.resolve(raw);
+        return resolved != null ? resolved : raw;
     }
 
     /**
@@ -333,8 +351,9 @@ public final class SnapshotSync {
             TagDto td = new TagDto();
             td.key = en.getKey();
             td.label = tag.label();
-            String cat = tag.effectiveCategory();
-            td.category = cat == null ? "" : cat;
+            // 协议字段 category 的语义不变（仍是**键**，客户端拿它跟面板/过滤比），
+            // 只是取值统一走 catKey 规范化；给人看的中文名由客户端 Categories.displayName 翻
+            td.category = catKey(tag);
             td.mode = tag.isAutoMode() ? ContainerTags.AUTO : ContainerTags.MANUAL;
             td.staging = tag.staging;
             dto.tags.add(td);

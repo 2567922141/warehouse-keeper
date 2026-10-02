@@ -19,6 +19,8 @@ import com.ds.warehouse.porter.Homes;
 import com.ds.warehouse.porter.Porter;
 import com.ds.warehouse.porter.Tasks;
 import com.ds.warehouse.util.Audit;
+import com.ds.warehouse.util.Categories;
+import com.ds.warehouse.util.CreativeOrder;
 import com.ds.warehouse.util.PlayerPerms;
 import com.ds.warehouse.web.WebSnapshot;
 import com.ds.warehouse.web.WebUsers;
@@ -128,6 +130,14 @@ public class WarehouseMod implements ModInitializer {
             WorldStore.enter(server);
             // 仓库区域定义（每个存档一份）
             RegionStore.load();
+
+            // 分类体系内核（0.21.0 / 优化6）：类目键 = 该物品所在「创造模式物品栏 · 分类页签」的注册键。
+            // 这件事必须排在一切分类 / 统计 / 排序之前 —— 包括下面的 IndexStore.load()：
+            //   1) CreativeOrder.ensure(server) 采集当前实例真实存在的页签及其内容物品；
+            //   2) Categories.clearCaches() 丢掉在此之前可能已经算过的物品→类目、旧名→children 缓存。
+            // 注意顺序：先 ensure 再 clear；反过来的话 clear 会把 ensure 前算出的旧值留下。
+            CreativeOrder.ensure(server);
+            Categories.clearCaches();
 
             String note = IndexStore.load(INDEX, server);
             if (note != null) {

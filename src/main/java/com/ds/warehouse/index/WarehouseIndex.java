@@ -72,6 +72,12 @@ public final class WarehouseIndex {
 
     /** 接收一个容器快照并聚合进索引 */
     public void accept(ContainerRecord rec) {
+        // 被排除的方块（雕纹书架 / 架子，见 Containers）一律不许进索引。
+        // 这里是「记录进入索引」的唯一入口：扫描与 IndexStore 从磁盘恢复都走它，所以旧索引里
+        // 已经存在的 chiseled_bookshelf / shelf 记录在本次开档恢复时就被丢掉了，不必另做一次清理。
+        if (Containers.excluded(rec.blockId)) {
+            return;
+        }
         revision++;
         if (rec.partner != null) {
             // 同一个物理箱子只许留一条记录：合并过的那条进来了，就把搭档坐标上的旧记录清掉

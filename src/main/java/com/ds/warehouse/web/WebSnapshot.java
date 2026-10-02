@@ -204,7 +204,9 @@ public final class WebSnapshot {
     private static List<CategoryRow> buildCategories(List<ItemRow> items) {
         Map<String, long[]> agg = new LinkedHashMap<>();
         Map<String, Integer> kinds = new LinkedHashMap<>();
-        for (String c : Categories.ORDER) {
+        // 行顺序 = Categories.order()（创造栏页签顺序 + 「其他」），与命令层 /warehouse categories stats 一致；
+        // CategoryRow.name 仍是**键**，显示名由客户端自己翻（协议字段语义没变）
+        for (String c : Categories.order()) {
             agg.put(c, new long[]{0, 0});
             kinds.put(c, 0);
         }

@@ -1,5 +1,6 @@
 package com.ds.warehouse.client;
 
+import com.ds.warehouse.config.CategoryRules;
 import com.ds.warehouse.util.Categories;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenKeyboardEvents;
@@ -41,8 +42,9 @@ import java.util.List;
  *   <li><b>几何自己算</b>：26.2 的 {@code AbstractContainerScreen} 没给公开的几何访问口，
  *       项目里也没有 mixin 基础设施，所以按原版常量估一个「只大不小」的外框，
  *       再由 {@link TagBarLayout} 决定贴左/贴右/横条/退化（纯数学，另有 runner 跑六种分辨率断言）。</li>
- *   <li><b>只认已贴/未贴，不猜分类</b>：分类清单就是仓库那 10 个分类（{@link Categories#ORDER}），
- *       当前生效的那个打勾；清单由「标签：… ▾」按钮弹出（自绘下拉，配色与仓库面板的「仓库：… ▾」一致）。</li>
+ *   <li><b>只认已贴/未贴，不猜分类</b>：分类清单来自 {@link Categories#order()}（创造栏页签顺序 + 「其他」，
+ *       类目数随整合包的页签数浮动），当前生效的那个打勾；清单由「标签：… ▾」按钮弹出（自绘下拉，配色与仓库面板的「仓库：… ▾」一致）。
+ *       清单比屏幕高时按行滚动，右下角用「a~b / n」标出位置。</li>
  *   <li><b>自动档 / 暂存箱锁住分类</b>：这两种状态下分类由箱内内容或「只出不进」策略决定，
  *       所以下拉按钮置灰点不开 —— 免得手选把自动结果覆盖掉。</li>
  * </ul>
@@ -106,6 +108,11 @@ public final class ContainerTagBar {
         /** 页脚高度（>0 时用来放「a~b / n」计数，不占条目行） */
         int footer;
         int hover = -1;
+        /**
+         * 这一份清单的类目**键**（显示名画的时候再翻）。刷新时重算 ——
+         * 类目数是动态的（10 → 14+ 都正常），所以不能是常量表。
+         */
+        final List<String> cats = new ArrayList<>();
     }
 
     /**
@@ -202,6 +209,42 @@ public final class ContainerTagBar {
         return isContainer(Minecraft.getInstance(), holder.locked) ? holder.locked : null;
     }
 
+    /**
+     * 这一次要画出来的类目键清单。
+     *
+     * <p>首选 {@link Categories#order()} —— 创造栏页签顺序 + 「其他」，就是服务端
+     * {@code Categories.of} 会产出的那套键，所以勾选比对是同一个坐标系。
+     *
+     * <p>但客户端**没有 {@code MinecraftServer}**，{@code CreativeOrder} 的表只有服务端
+     * {@code ensure(server)} 才建得起来 ⇒ 单机/联机的客户端拿到的 {@code order()} 往往只剩
+     * 「其他」一个。这时退回旧中文类目名（{@link CategoryRules#LEGACY}）：服务端
+     * {@code Categories.resolve} 认得它们（父类语义），点了也能贴标签。
+     *
+     * <p>最后把「当前生效但不在表里」的键补到末尾，否则箱子明明贴着某个类目，下拉里却没有勾。
+     */
+    private static List<String> categoryKeys(String current) {
+        List<String> keys = new ArrayList<>(Categories.order());
+        if (keys.size() <= 1) {
+            keys = new ArrayList<>();
+            for (String legacy : CategoryRules.LEGACY) {
+                // 旧清单最后那个「其他」在新体系里换成了合成键，勾要对得上就得跟着换
+                keys.add("其他".equals(legacy) ? Categories.OTHER : legacy);
+            }
+        }
+        if (current != null && !current.isEmpty() && !keys.contains(current)) {
+            keys.add(current);
+        }
+        return keys;
+    }
+
+    /** 读当前清单；万一某一帧先于 {@code refresh} 用到（还没算过），就地用兜底清单顶上 */
+    private static List<String> catsOf(Holder holder) {
+        if (holder.cats.isEmpty()) {
+            holder.cats.addAll(categoryKeys(currentCategory(holder)));
+        }
+        return holder.cats;
+    }
+
     /** 点下拉清单：选中一项就发指令并收起，点清单外面只是收起 —— 两种情况都吃掉这次点击，免得误碰箱子槽位 */
     private static boolean clickList(Holder holder, MouseButtonEvent event) {
         if (!holder.open) {
@@ -221,7 +264,7 @@ public final class ContainerTagBar {
         if (!holder.open) {
             return true;
         }
-        int max = Math.max(0, Categories.ORDER.size() - holder.rows);
+        int max = Math.max(0, catsOf(holder).size() - holder.rows);
         int next = holder.scroll - (int) Math.signum(amountY);
         holder.scroll = Math.max(0, Math.min(max, next));
         return false;
@@ -247,13 +290,15 @@ public final class ContainerTagBar {
             return -1;
         }
         int index = holder.scroll + row;
-        return index < Categories.ORDER.size() ? index : -1;
+        return index < catsOf(holder).size() ? index : -1;
     }
 
     private static void pick(Holder holder, int index) {
         BlockPos pos = lockedTarget(holder);   // 同 tag()：发指令只认锁定坐标
-        if (pos != null) {
-            send("warehouse tag set \"" + Categories.ORDER.get(index) + "\" " + coords(pos));
+        List<String> keys = catsOf(holder);
+        if (pos != null && index >= 0 && index < keys.size()) {
+            // 发的是**键**：服务端 Categories.resolve 认页签键，也认旧中文父类名
+            send("warehouse tag set \"" + keys.get(index) + "\" " + coords(pos));
         }
         holder.open = false;
         refresh(holder);
@@ -311,26 +356,30 @@ public final class ContainerTagBar {
 
         holder.hover = indexAt(holder, mouseX, mouseY);
         String current = currentCategory(holder);
+        List<String> keys = catsOf(holder);
         for (int row = 0; row < holder.rows; row++) {
             int index = holder.scroll + row;
-            if (index >= Categories.ORDER.size()) {
+            if (index >= keys.size()) {
                 break;
             }
             int y = holder.listY + 2 + row * LINE_H;
             int x = holder.listX + 1;
             int w = holder.listW - 2;
-            boolean chosen = Categories.ORDER.get(index).equals(current);
+            boolean chosen = keys.get(index).equals(current);
             if (chosen) {
                 g.fill(x, y, x + w, y + LINE_H, 0xFF1D3350);
             } else if (index == holder.hover) {
                 g.fill(x, y, x + w, y + LINE_H, 0xFF24313F);
             }
-            String text = chosen ? "✓ " + Categories.ORDER.get(index) : Categories.ORDER.get(index);
+            // 显示名走 Categories.displayName（创造栏页签的中文名 / 旧类目名 / 「其他」），
+            // 模组页签名可能很长，按清单宽度用既有的 fit 截断
+            String name = Categories.displayName(keys.get(index));
+            String text = fit(chosen ? "✓ " + name : name, w - 4);
             int tx = x + Math.max(0, (w - mc.font.width(text)) / 2);
             int ty = y + Math.max(0, (LINE_H - mc.font.lineHeight) / 2);
             g.text(mc.font, text, tx, ty, chosen ? 0xFFFFFFFF : 0xFFD6DEEA);
         }
-        int total = Categories.ORDER.size();
+        int total = keys.size();
         if (holder.footer > 0) {
             // 计数条画在预留的页脚里，别压在最后一行上
             String more = (holder.scroll + 1) + "~" + (holder.scroll + holder.rows) + " / " + total;
@@ -425,7 +474,9 @@ public final class ContainerTagBar {
             if (category.isEmpty()) {
                 value = "未设置";
             } else {
-                value = auto ? category + "（自动）" : category;
+                // 键 → 中文显示名（创造栏页签名 / 旧类目名 / 「其他」）
+                String shown = Categories.displayName(category);
+                value = auto ? shown + "（自动）" : shown;
             }
         }
         String fullTitle = PREFIX + value;
@@ -566,7 +617,10 @@ public final class ContainerTagBar {
 
     /** 下拉清单贴在「标签：…」按钮正下方（下面放不下就翻到上面），并夹在屏幕里 */
     private static void layoutList(Holder holder, int screenW, int screenH) {
-        int total = Categories.ORDER.size();
+        // 类目数是动态的：每 tick 重算一次清单（含「当前键不在表里就补上」的兜底）
+        holder.cats.clear();
+        holder.cats.addAll(categoryKeys(currentCategory(holder)));
+        int total = holder.cats.size();
         int btnBottom = holder.title.getY() + holder.title.getHeight();
         int below = Math.max(0, screenH - btnBottom - 2);
         int above = Math.max(0, holder.title.getY() - 2);
@@ -579,7 +633,15 @@ public final class ContainerTagBar {
         }
         holder.rows = Math.max(1, rows);
         holder.footer = total > holder.rows ? 11 : 0;
+        // 宽度：够放标题，也够放最长的显示名（模组页签名可能很长），但不超出屏幕
         int w = Math.max(holder.title.getWidth(), 96);
+        Minecraft mc = Minecraft.getInstance();
+        if (mc != null) {
+            for (String key : holder.cats) {
+                w = Math.max(w, mc.font.width(Categories.displayName(key)) + 16);
+            }
+        }
+        w = Math.min(w, Math.max(1, screenW));
         int h = holder.rows * LINE_H + 4 + holder.footer;
         int y = down ? btnBottom + 2 : Math.max(0, holder.title.getY() - 2 - h);
         holder.listW = w;

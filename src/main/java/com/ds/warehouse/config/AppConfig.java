@@ -42,6 +42,18 @@ public final class AppConfig {
     public boolean scanForceLoadChunks = true;
 
     /**
+     * 不参与仓库管理（不建索引、不统计、不整理）的容器方块 id，逗号分隔。
+     *
+     * <p>默认排除雕纹书架与 26.2 新增的架子 —— 这两类是陈列/装饰性质，被整理会打乱玩家的摆法；
+     * 其余所有容器（箱子、木桶、漏斗、熔炉、发射器、潜影盒……以及模组的箱子）照常统计与整理。
+     *
+     * <p>整合包里若有「只能放特定物品的展示架 / 书架」也想挡掉，把它的方块 id 填进来即可，
+     * 例如 {@code minecraft:chiseled_bookshelf,minecraft:shelf,some_mod:display_rack}。
+     * 空值 / 多余空格 / 大小写都会被 {@link #normalize()} 规整，改动后下一次判定即生效。
+     */
+    public String containerExclude = "minecraft:chiseled_bookshelf,minecraft:shelf";
+
+    /**
      * 要不要给搬运工一个「人形」——用 Carpet 的 /player 指令生成一个真正的假人玩家。
      *
      * 装了这个开关才有意义：没装 Carpet 时本模组照常工作，只是搬运工是隐形的。
@@ -83,6 +95,30 @@ public final class AppConfig {
         return FabricLoader.getInstance().getConfigDir()
                 .resolve("warehouse-keeper")
                 .resolve("settings.json");
+    }
+
+    /**
+     * 当前生效的「不参与仓库管理」的方块 id 集合。
+     *
+     * <p>由 {@link #containerExclude} 现算：先 trim、再丢掉空项、最后统一转小写。
+     * 每次判定都重新解析，所以玩家在设置界面 / 文件里改完，<b>下一次判定就能生效</b>，不需要重启。
+     *
+     * @return 小写、去空、不可变的集合；没有排除项时是空集合
+     */
+    public static java.util.Set<String> excludedContainers() {
+        AppConfig c = get();
+        String raw = c.containerExclude;
+        if (raw == null || raw.isBlank()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        for (String part : raw.split(",")) {
+            String id = part.trim();
+            if (!id.isEmpty()) {
+                out.add(id.toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        return java.util.Set.copyOf(out);
     }
 
     public static AppConfig load() {
@@ -129,6 +165,9 @@ public final class AppConfig {
         }
         if (tidyTicksPerMove > 20) {
             tidyTicksPerMove = 20;
+        }
+        if (containerExclude == null) {
+            containerExclude = "";
         }
     }
 }

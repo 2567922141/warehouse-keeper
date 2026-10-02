@@ -1,6 +1,7 @@
 package com.ds.warehouse.index;
 
 import com.ds.warehouse.WarehouseMod;
+import com.ds.warehouse.config.ContainerTags;
 import com.ds.warehouse.config.Region;
 import com.ds.warehouse.config.RegionStore;
 import com.ds.warehouse.web.WebSnapshot;
@@ -71,21 +72,33 @@ public final class IndexRefresh {
 
     /** 注册两块世界事件。只在模组初始化时调一次。 */
     public static void register() {
-        // 拆掉容器：索引里那条记录必须立刻消失，否则面板和指令会一直显示已经不存在的箱子
+        // 拆掉容器：索引里那条记录必须立刻消失，否则面板和指令会一直显示已经不存在的箱子；
+        // 贴在它上面的标签也要一起处理 —— 否则原地再放一个新箱子会直接继承旧标签（BUG5）
         PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, entity) -> {
-            if (level.isClientSide()) {
+            // 破坏事件给进来的是 Level（客户端也会走到这里），索引和标签只在服务端维护
+            if (!(level instanceof ServerLevel server)) {
                 return;
             }
-            String dim = level.dimension().identifier().toString();
+            String dim = server.dimension().identifier().toString();
             String key = WarehouseIndex.key(dim, pos);
-            boolean known = WarehouseMod.INDEX.containers.containsKey(key);
+            // 「拆之前这一对箱子」的正式键。必须在事件里用 state 自己算：
+            //   1) AFTER 事件触发时方块已经没了，Scanner.canonical() 在这一半上看不到搭档；
+            //   2) Scanner.canonical() 走的是会强载搭档区块的路径，破坏方块时不能这么干。
+            BlockPos partner = Scanner.partnerOf(server, pos, state);
+            String pairKey = WarehouseIndex.key(dim,
+                    partner != null && partner.compareTo(pos) < 0 ? partner : pos);
+            // 搭档还活着（拆的是双联箱的一半）⇒ 标签挪到搭档自己的键；两半都没了 ⇒ 删标签
+            boolean partnerAlive = partner != null && server.getBlockEntity(partner) instanceof Container;
+            String keepKey = partnerAlive ? WarehouseIndex.key(dim, partner) : null;
+            boolean known = WarehouseMod.INDEX.containers.containsKey(key)
+                    || WarehouseMod.INDEX.containers.containsKey(pairKey);
             if (entity instanceof Container || known) {
-                if (known && WarehouseMod.INDEX.containers.remove(key) != null) {
-                    WarehouseMod.INDEX.reaggregate();
-                    WebSnapshot.markDirty();
+                containerGone(key, pairKey, keepKey);
+                markRegionOf(server, pos);
+                if (partnerAlive) {
+                    // 双联箱拆一半：活着的那半通常在隔壁方块（可能跨区块/跨区域边界），一起排队重扫
+                    markRegionOf(server, partner);
                 }
-                SIG.remove(key);
-                markRegionOf(level, pos);
             }
         });
 
@@ -98,8 +111,50 @@ public final class IndexRefresh {
         });
     }
 
+    /**
+     * 一只容器消失后的收尾：删掉索引记录，并把标签删掉、或挪给活下来的那一半。
+     *
+     * <p>「消失」有两种触发：玩家拆掉（{@link PlayerBlockBreakEvents#AFTER}）与抽查时发现
+     * 坐标上已经不是容器（爆炸 / {@code setblock} 换掉，见 {@link #pollContainers}）。
+     * 以前这里只删索引记录，标签会变成「死标签」：原地再放一个新箱子会自动继承旧分类。
+     *
+     * @param rawKey  消失的那个坐标的键（双联箱里可能是坐标靠后的那一半）
+     * @param pairKey 消失之前「这一对」的正式键（标签实际用的就是它）
+     * @param keepKey 搭档还活着时要挪过去的键；搭档也没了就传 null（直接删标签）
+     */
+    private static void containerGone(String rawKey, String pairKey, String keepKey) {
+        boolean known = WarehouseMod.INDEX.containers.containsKey(pairKey)
+                || (!rawKey.equals(pairKey) && WarehouseMod.INDEX.containers.containsKey(rawKey));
+        if (known) {
+            // 增量减掉这条记录的贡献（removeContainer 内部会 deaggregate），不必整份重算
+            WarehouseMod.INDEX.removeContainer(pairKey);
+            WarehouseMod.INDEX.removeContainer(rawKey);
+            WebSnapshot.markDirty();
+        }
+        SIG.remove(pairKey);
+        SIG.remove(rawKey);
+        if (keepKey == null) {
+            ContainerTags.clear(pairKey);
+            if (!rawKey.equals(pairKey)) {
+                ContainerTags.clear(rawKey);
+            }
+        } else {
+            ContainerTags.rekey(pairKey, keepKey);
+            if (!rawKey.equals(pairKey)) {
+                ContainerTags.rekey(rawKey, keepKey);
+            }
+        }
+    }
+
     /** 挂在服务端 tick 上。 */
     public static void tick(MinecraftServer server) {
+        // 「自动」路径的标签改动（拆箱挪键 / 拼箱合并 / 抽查清理）只把 ContainerTags 标成 dirty，
+        // 命令路径各自会存盘、SERVER_STOPPING 也会存 —— 但强杀进程时这些自动改动会回滚，
+        // 重启后 BUG3/BUG5 的现象又会复现（审查发现 1）。这里补一个周期落盘点，dirty 才写盘。
+        if (ContainerTags.isDirty()) {
+            ContainerTags.save();
+        }
+
         if (!STALE.isEmpty() && !Scanner.isRunning() && !RegionStore.REGIONS.isEmpty()) {
             // 一次只排一个仓库：局部重扫本身就占 tick 预算，攒着慢慢来比一次全排上去好
             Iterator<String> it = STALE.iterator();
@@ -251,9 +306,26 @@ public final class IndexRefresh {
             ContainerRecord rec = WarehouseMod.INDEX.containers.get(key);
             SIG.remove(key);
             if (rec == null) {
+                // 记录已经被别的路径删掉了，只剩标签还指着这个坐标：一并清掉（BUG5）
+                ContainerTags.clear(key);
                 continue;
             }
             ServerLevel level = Scanner.levelOf(server, rec.dimension);
+            // 双联箱只没了一半（被炸掉 / 被 setblock 换掉）时不能直接清标签：标签要跟着活下来的
+            // 那半走，跟玩家亲手拆箱那条路（PlayerBlockBreakEvents）保持一致。
+            // 只在这份记录的搭档坐标上问一句 —— isLoaded 不会加载区块，tick 线程可以放心调。
+            String keepKey = null;
+            if (rec.partner != null && level != null && level.isLoaded(rec.partner)
+                    && level.getBlockEntity(rec.partner) instanceof Container) {
+                keepKey = WarehouseIndex.key(rec.dimension, rec.partner);
+            }
+            if (keepKey == null) {
+                // 确认「这个坐标上已经不是容器」了：标签也要一起清掉，否则原地再放一个新箱子
+                // 会自动继承旧分类（BUG5）。只清这一个键，别的坐标上的标签一概不动。
+                ContainerTags.clear(key);
+            } else {
+                ContainerTags.rekey(key, keepKey);
+            }
             if (level != null) {
                 markRegionOf(level, rec.pos); // 让那片区域重扫一遍，把换了/没了的箱子找回来
             }

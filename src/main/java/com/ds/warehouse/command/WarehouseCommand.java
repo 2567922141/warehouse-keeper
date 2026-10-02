@@ -108,7 +108,7 @@ public final class WarehouseCommand {
                             return 1;
                         }))
                         .then(Commands.literal("save")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .executes(ctx -> {
                                             ServerPlayer p = ctx.getSource().getPlayerOrException();
                                             UUID id = p.getUUID();
@@ -129,7 +129,7 @@ public final class WarehouseCommand {
                                             return 1;
                                         })))
                         .then(Commands.literal("info")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> {
                                             Region r = RegionStore.REGIONS.get(
@@ -145,7 +145,7 @@ public final class WarehouseCommand {
                                             return 1;
                                         })))
                         .then(Commands.literal("height")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .then(Commands.literal("full").executes(ctx -> setHeight(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name"), true)))
@@ -153,12 +153,12 @@ public final class WarehouseCommand {
                                                 StringArgumentType.getString(ctx, "name"), false)))))
                         .then(Commands.literal("grow").then(growNode()))
                         .then(Commands.literal("merge")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> mergeRegion(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name")))))
                         .then(Commands.literal("remove")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> {
                                             String name = StringArgumentType.getString(ctx, "name").toLowerCase(Locale.ROOT);
@@ -181,7 +181,7 @@ public final class WarehouseCommand {
                                         }))))
                 .then(Commands.literal("scan").requires(WarehouseCommand::admin)
                         .executes(ctx -> startScan(ctx.getSource(), null))
-                        .then(Commands.argument("name", StringArgumentType.word())
+                        .then(Commands.argument("name", NameArgument.name())
                                 .suggests(REGION_SUGGEST)
                                 .executes(ctx -> startScan(ctx.getSource(),
                                         StringArgumentType.getString(ctx, "name").toLowerCase(Locale.ROOT)))))
@@ -343,31 +343,31 @@ public final class WarehouseCommand {
                                 .then(Commands.literal("off").executes(ctx -> porterBody(ctx.getSource(), false))))
                         .then(Commands.literal("add").requires(WarehouseCommand::admin)
                                 .executes(ctx -> botAdd(ctx.getSource(), ""))
-                                .then(Commands.argument("region", StringArgumentType.word())
+                                .then(Commands.argument("region", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> botAdd(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "region")))))
                         .then(Commands.literal("staff").requires(WarehouseCommand::admin)
                                 .executes(ctx -> porterStaff(ctx.getSource(), ""))
-                                .then(Commands.argument("region", StringArgumentType.word())
+                                .then(Commands.argument("region", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> porterStaff(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "region")))))
                         .then(Commands.literal("tidy").requires(WarehouseCommand::admin)
                                 .executes(ctx -> porterTask(ctx.getSource(), Tasks.TIDY, ""))
-                                .then(Commands.argument("region", StringArgumentType.word())
+                                .then(Commands.argument("region", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> porterTask(ctx.getSource(), Tasks.TIDY,
                                                 StringArgumentType.getString(ctx, "region")))))
                         .then(Commands.literal("sweep").requires(WarehouseCommand::admin)
                                 .executes(ctx -> porterTask(ctx.getSource(), Tasks.SWEEP, ""))
-                                .then(Commands.argument("region", StringArgumentType.word())
+                                .then(Commands.argument("region", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> porterTask(ctx.getSource(), Tasks.SWEEP,
                                                 StringArgumentType.getString(ctx, "region")))))
                         .then(Commands.literal("preview").requires(WarehouseCommand::admin)
                                 .executes(ctx -> porterPreview(ctx.getSource(), ""))
-                                .then(Commands.argument("region", StringArgumentType.word())
+                                .then(Commands.argument("region", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> porterPreview(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "region")))))
@@ -376,30 +376,30 @@ public final class WarehouseCommand {
                         .executes(ctx -> botList(ctx.getSource()))
                         .then(Commands.literal("add")
                                 .executes(ctx -> botAdd(ctx.getSource(), ""))
-                                .then(Commands.argument("region", StringArgumentType.word())
+                                .then(Commands.argument("region", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> botAdd(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "region")))))
                         .then(Commands.literal("remove")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
                                         .executes(ctx -> botRemove(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name")))))
                         .then(Commands.literal("assign")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
-                                        .then(Commands.argument("region", StringArgumentType.word())
+                                        .then(Commands.argument("region", NameArgument.name())
                                                 .suggests(REGION_SUGGEST)
                                                 .executes(ctx -> botAssign(ctx.getSource(),
                                                         StringArgumentType.getString(ctx, "name"),
                                                         StringArgumentType.getString(ctx, "region"))))))
                         .then(Commands.literal("here")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
                                         .executes(ctx -> botHere(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name")))))
                         .then(Commands.literal("spot")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
                                         .executes(ctx -> botSpot(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name"), false))
@@ -407,12 +407,12 @@ public final class WarehouseCommand {
                                                 .executes(ctx -> botSpot(ctx.getSource(),
                                                         StringArgumentType.getString(ctx, "name"), true)))))
                         .then(Commands.literal("spawn")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
                                         .executes(ctx -> botSpawn(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name")))))
                         .then(Commands.literal("kill")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
                                         .executes(ctx -> botKill(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name")))))
@@ -421,7 +421,7 @@ public final class WarehouseCommand {
                         .then(Commands.literal("sweep")
                                 .then(taskNode(Tasks.SWEEP)))
                         .then(Commands.literal("stop")
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
                                         .executes(ctx -> botStop(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name"))))))
@@ -429,7 +429,7 @@ public final class WarehouseCommand {
                         .then(Commands.literal("list").requires(WarehouseCommand::admin)
                                 .executes(ctx -> userList(ctx.getSource())))
                         .then(Commands.literal("perm").requires(WarehouseCommand::admin)
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", NameArgument.name())
                                         .suggests(USER_SUGGEST)
                                         .then(Commands.literal("take")
                                                 .then(permSwitch("take")))
@@ -483,10 +483,10 @@ public final class WarehouseCommand {
      * <p>都是「名字 → 可选仓库」：不写仓库就用这个假人分配到的仓库。
      */
     private static RequiredArgumentBuilder<CommandSourceStack, String> taskNode(int kind) {
-        return Commands.argument("name", StringArgumentType.word())
+        return Commands.argument("name", NameArgument.name())
                 .suggests(BOT_SUGGEST)
                 .executes(ctx -> botTask(ctx.getSource(), StringArgumentType.getString(ctx, "name"), kind, ""))
-                .then(Commands.argument("region", StringArgumentType.word())
+                .then(Commands.argument("region", NameArgument.name())
                         .suggests(REGION_SUGGEST)
                         .executes(ctx -> botTask(ctx.getSource(), StringArgumentType.getString(ctx, "name"),
                                 kind, StringArgumentType.getString(ctx, "region"))));
@@ -1218,6 +1218,7 @@ public final class WarehouseCommand {
 
     /** {@code /warehouse user perm <名字> <take|bot|tidy> on|off} 里的开关 */
     private static RequiredArgumentBuilder<CommandSourceStack, String> permSwitch(String kind) {
+        // 这里是 on/off 枚举值，刻意保持原版 word()：写错时 Brigadier 的报错更直接
         return Commands.argument("onoff", StringArgumentType.word())
                 .suggests((ctx, builder) -> SharedSuggestionProvider.suggest(List.of("on", "off"), builder))
                 .executes(ctx -> userPerm(ctx.getSource(),
@@ -1235,10 +1236,13 @@ public final class WarehouseCommand {
      * <p>方向刻意用 {@link Commands#literal} 而不是 {@code word()} 参数：
      * brigadier 的 word() 只认 {@code [a-zA-Z0-9_]}，中文方向（北/南/东/西/上/下）
      * 会被判成非法字符，报 "Expected whitespace to end one argument"。
+     *
+     * <p>仓库名用 {@link NameArgument}：不带引号读到空白为止，所以中文名可以裸写，
+     * 名字里有空格时写成 {@code "东边 仓库"}。
      */
     private static RequiredArgumentBuilder<CommandSourceStack, String> growNode() {
         RequiredArgumentBuilder<CommandSourceStack, String> nameNode =
-                Commands.argument("name", StringArgumentType.word())
+                Commands.argument("name", NameArgument.name())
                         .suggests(REGION_SUGGEST)
                  // 不带方向 = 把仓库扩到包含「你现在站的位置」
                         .executes(ctx -> growRegion(ctx.getSource(),

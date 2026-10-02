@@ -51,6 +51,12 @@ public final class ContainerTagBar {
 
     /** 射线够得着的距离（方块） */
     private static final int REACH = 6;
+    /**
+     * 迟滞阈值（客户端 tick）：射线连续落空多少次之后才把标签栏藏起来。
+     * 12 tick ≈ 0.6 s —— 够盖住「手抖 / 转头 / 方块实体这一帧还没同步到客户端」这类瞬时落空，
+     * 又不至于让玩家挪开视线后还长时间挂着一栏点不掉的按钮。
+     */
+    private static final int MISS_LIMIT = 12;
     /** 附加按钮：自动 / 暂存 / 清除 */
     private static final int EXTRA = 3;
     /** 下拉清单每行高度（和仓库面板的下拉同一套手感） */
@@ -72,6 +78,14 @@ public final class ContainerTagBar {
         final List<Button> extras = new ArrayList<>();
         /** 上次定位到的箱子（用来判断要不要刷新文字） */
         BlockPos lastPos;
+        /**
+         * 当前**锁定**的箱子：这一帧照着它画、按钮也照着它发指令的那一只。
+         * 与 {@link #lastPos} 分开：{@code lastPos} 是「文案用的是哪只箱」，
+         * {@code locked} 是「这一帧画的是哪只箱」—— 后者带迟滞，不随单 tick 射线落空而变。
+         */
+        BlockPos locked;
+        /** 锁定目标失效后连续落空的 tick 数；够 {@code MISS_LIMIT} 才隐藏 */
+        int missTicks;
         /** 上次真正画出来的按钮文字（可能带箭头、可能被截断） */
         String lastTitle = "\u0000";
         /** 上次的**完整**标题（没截断的那份）：窄条下分类名被截掉时，靠它才认得出 tooltip 该换 */
@@ -94,6 +108,13 @@ public final class ContainerTagBar {
         int hover = -1;
     }
 
+    /**
+     * 每个屏幕实例一套 Holder，跨 resize 复用：{@code Screen.resize} 会重新 init、再触发一次
+     * {@code AFTER_INIT}，没有这张表的话控件会被重复注册、锁定坐标与 miss 计数会被清零。
+     * 键就是屏幕实例本身；用 {@link java.util.WeakHashMap} 是希望屏幕关掉后条目能自己走掉。
+     */
+    private static final java.util.Map<Screen, Holder> HOLDERS = new java.util.WeakHashMap<>();
+
     private ContainerTagBar() {
     }
 
@@ -103,43 +124,82 @@ public final class ContainerTagBar {
             if (!(screen instanceof AbstractContainerScreen<?>)) {
                 return;
             }
-            Holder holder = new Holder();
-            holder.screen = screen;
+            // 真门禁：个人物品栏 / 创造物品栏也是 AbstractContainerScreen，但服务端并没有开容器菜单，
+            // 这时 containerMenu 还是那份常驻的 inventoryMenu —— 用它把「背包界面」挡在外面，
+            // 免得准心对着箱子按 E 时，标签栏也贴到个人物品栏旁边。
+            // （两个字段都是原版 public，不需要 mixin。）
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player == null || mc.player.containerMenu == mc.player.inventoryMenu) {
+                return;
+            }
+            Holder cached = HOLDERS.get(screen);
+            if (cached == null) {
+                // 第一次见到这个屏幕：建 Holder、建控件、挂事件。holder 之后不再重新赋值，
+                // 所以下面这些 lambda 能直接捕获它（按钮要按「锁定坐标」发指令）。
+                Holder holder = new Holder();
+                HOLDERS.put(screen, holder);
+                holder.screen = screen;
 
-            // 分类不再是 10 个按钮，而是「标签：… ▾」按钮弹出的一张自绘清单
-            // （和仓库面板里的「仓库：… ▾」同一种样式：深底、蓝框、当前项打勾、悬停高亮）。
-            holder.title = add(screen, 0, 0, TagBarLayout.WIDE, () -> {
-                if (holder.lastLocked) {
-                    return;   // 自动档 / 暂存箱：按钮已置灰，这里再兜一次底
-                }
-                holder.open = !holder.open;
-                holder.scroll = 0;
+                // 分类不再是 10 个按钮，而是「标签：… ▾」按钮弹出的一张自绘清单
+                // （和仓库面板里的「仓库：… ▾」同一种样式：深底、蓝框、当前项打勾、悬停高亮）。
+                holder.title = add(screen, 0, 0, TagBarLayout.WIDE, () -> {
+                    if (holder.lastLocked) {
+                        return;   // 自动档 / 暂存箱：按钮已置灰，这里再兜一次底
+                    }
+                    holder.open = !holder.open;
+                    holder.scroll = 0;
+                    refresh(holder);
+                });
+                // ① 自动：按箱内现有东西重新猜一次分类 ② 暂存：开关 ③ 清除
+                holder.extras.add(add(screen, 0, 0, 43, () -> tag(holder, "auto")));
+                holder.extras.add(add(screen, 0, 0, 43, () -> tag(holder, "staging")));
+                holder.extras.add(add(screen, 0, 0, 43, () -> tag(holder, "clear")));
+
+                // 点清单 → 选分类；点别处 → 收起；都吃掉这次点击，免得误碰箱子槽位
+                ScreenMouseEvents.allowMouseClick(screen).register((s, event) -> clickList(holder, event));
+                ScreenMouseEvents.allowMouseScroll(screen).register((s, mouseX, mouseY, amountX, amountY)
+                        -> scrollList(holder, amountY));
+                ScreenKeyboardEvents.allowKeyPress(screen).register((s, event) -> keyList(holder, event));
+                // 清单画在容器界面之后（afterExtract 就是「界面自己的东西都提完」那一趟）
+                ScreenEvents.afterExtract(screen).register((s, graphics, mouseX, mouseY, tickDelta)
+                        -> drawList(holder, graphics, mouseX, mouseY));
+
+                ScreenEvents.afterTick(screen).register(s -> refresh(holder));
+                // 屏幕关掉时把这一条从表里摘掉：HOLDERS 虽然是 WeakHashMap，但 value 里的
+                // holder.screen 反过来强引用 key，条目并不会自己消失 —— 不摘的话每开一次箱子
+                // 就会留住一套 Holder + 4 个按钮直到客户端退出。
+                ScreenEvents.remove(screen).register(s -> HOLDERS.remove(s));
                 refresh(holder);
-            });
-            // ① 自动：按箱内现有东西重新猜一次分类 ② 暂存：开关 ③ 清除
-            holder.extras.add(add(screen, 0, 0, 43, () -> tag("auto")));
-            holder.extras.add(add(screen, 0, 0, 43, () -> tag("staging")));
-            holder.extras.add(add(screen, 0, 0, 43, () -> tag("clear")));
-
-            // 点清单 → 选分类；点别处 → 收起；都吃掉这次点击，免得误碰箱子槽位
-            ScreenMouseEvents.allowMouseClick(screen).register((s, event) -> clickList(holder, event));
-            ScreenMouseEvents.allowMouseScroll(screen).register((s, mouseX, mouseY, amountX, amountY)
-                    -> scrollList(holder, amountY));
-            ScreenKeyboardEvents.allowKeyPress(screen).register((s, event) -> keyList(holder, event));
-            // 清单画在容器界面之后（afterExtract 就是「界面自己的东西都提完」那一趟）
-            ScreenEvents.afterExtract(screen).register((s, graphics, mouseX, mouseY, tickDelta)
-                    -> drawList(holder, graphics, mouseX, mouseY));
-
-            ScreenEvents.afterTick(screen).register(s -> refresh(holder));
-            refresh(holder);
+                return;
+            }
+            // resize 又触发了一次 AFTER_INIT：复用同一个 Holder（锁定坐标、miss 计数、下拉展开状态、
+            // 上次文案全都留着）。事件**不再重挂**一遍 —— 它们是挂在屏幕实例上的，resize 不会清掉，
+            // 重挂只会让每 tick 多刷一次。
+            // 但控件表会被原版清空，所以必须把**已有的**控件挂回去（幂等），否则 resize 后按钮就没了。
+            cached.screen = screen;
+            attach(screen, cached.title);
+            for (Button b : cached.extras) {
+                attach(screen, b);
+            }
+            refresh(cached);
         });
     }
 
-    private static void tag(String sub) {
-        BlockPos pos = target();
+    /**
+     * 发一条标签指令。坐标取**当前锁定坐标**（也就是标签栏正在显示的那只箱子），而不是再打一次射线：
+     * 迟滞期间玩家把准心挪开时，按钮发的指令必须和栏上写的是同一只箱子。
+     * 锁定目标已经不在了（被拆掉 / 还没锁定）就一条指令都不发，绝不对着空气发指令。
+     */
+    private static void tag(Holder holder, String sub) {
+        BlockPos pos = lockedTarget(holder);
         if (pos != null) {
             send("warehouse tag " + sub + " " + coords(pos));
         }
+    }
+
+    /** 现在可以对着发指令的锁定坐标：已锁定、且那一格现在仍是容器；否则 null */
+    private static BlockPos lockedTarget(Holder holder) {
+        return isContainer(Minecraft.getInstance(), holder.locked) ? holder.locked : null;
     }
 
     /** 点下拉清单：选中一项就发指令并收起，点清单外面只是收起 —— 两种情况都吃掉这次点击，免得误碰箱子槽位 */
@@ -191,7 +251,7 @@ public final class ContainerTagBar {
     }
 
     private static void pick(Holder holder, int index) {
-        BlockPos pos = target();
+        BlockPos pos = lockedTarget(holder);   // 同 tag()：发指令只认锁定坐标
         if (pos != null) {
             send("warehouse tag set \"" + Categories.ORDER.get(index) + "\" " + coords(pos));
         }
@@ -199,10 +259,10 @@ public final class ContainerTagBar {
         refresh(holder);
     }
 
-    /** 目标箱子当前生效的分类（暂存箱没有分类） */
-    private static String currentCategory() {
+    /** 锁定箱子当前生效的分类（暂存箱没有分类）；下拉勾选也走这里，免得迟滞期间勾跟着射线乱跳 */
+    private static String currentCategory(Holder holder) {
         Minecraft mc = Minecraft.getInstance();
-        BlockPos pos = target();
+        BlockPos pos = holder.locked;
         if (mc.level == null || pos == null) {
             return "";
         }
@@ -250,7 +310,7 @@ public final class ContainerTagBar {
         border(g, holder.listX, holder.listY, x1, y1, 0xFF4E8BD8);
 
         holder.hover = indexAt(holder, mouseX, mouseY);
-        String current = currentCategory();
+        String current = currentCategory(holder);
         for (int row = 0; row < holder.rows; row++) {
             int index = holder.scroll + row;
             if (index >= Categories.ORDER.size()) {
@@ -289,20 +349,58 @@ public final class ContainerTagBar {
     private static Button add(Screen screen, int x, int y, int w, Runnable press) {
         Button button = Button.builder(Component.literal(" "), b -> press.run())
                 .bounds(x, y, w, TagBarLayout.BTN_H).build();
-        Screens.getWidgets(screen).add(button);
+        // 先藏起来：位置和可见性一律由 refresh() 决定。带迟滞之后 refresh() 可能连着十几个 tick
+        // 谁都不画（还没锁定目标），那时绝不能把「刚建好、停在 (0,0)、文字还是个空格」的按钮露出来。
+        button.visible = false;
+        attach(screen, button);
         return button;
     }
 
-    /** 每秒（每个客户端 tick）对一次：目标换了、标签变了、窗口缩放了，都在这儿重新贴 */
+    /**
+     * 把控件挂回屏幕的控件表。<b>幂等</b>：{@code Screen.resize} 会清空控件表并重新 init，
+     * 于是 {@code AFTER_INIT} 会再触发一次 —— 那时要把**同一个**按钮挂回去，而不是再造一个新的；
+     * 也不能因为「表里已经有了」就干脆不挂（不挂 = resize 之后按钮消失）。
+     */
+    private static void attach(Screen screen, AbstractWidget widget) {
+        List<AbstractWidget> widgets = Screens.getWidgets(screen);
+        if (!widgets.contains(widget)) {
+            widgets.add(widget);
+        }
+    }
+
+    /**
+     * 每个客户端 tick 对一次（20 次/秒）：目标换了、标签变了、窗口缩放了，都在这儿重新贴。
+     *
+     * <p>本方法带<b>迟滞</b>：单个 tick 的射线落空（手抖、转头、方块实体这一帧还没同步到客户端）
+     * 不会把整条标签栏藏掉 —— 只要锁定目标还在（{@link #isContainer}）就继续照着它画，
+     * 连续 {@link #MISS_LIMIT} 个 tick 都拿不到有效目标才 {@link #hide}。
+     */
     private static void refresh(Holder holder) {
         Minecraft mc = Minecraft.getInstance();
-        BlockPos pos = target();
-        if (mc.level == null || pos == null) {
+        if (mc.level == null) {
             hide(holder);
             return;
         }
+        // 本 tick 射线打到的容器：打到就（重新）锁定它、miss 计数清零 —— 换箱子也在这一步生效。
+        BlockPos hit = target();
+        if (hit != null) {
+            holder.locked = hit;
+            holder.missTicks = 0;
+        } else if (holder.locked == null || !isContainer(mc, holder.locked)) {
+            // 射线落空，而且锁定目标也失效了（被拆掉 / 从来没锁上）：开始数 miss。
+            // 没数够阈值就只 return —— 不画、也不改文案，上一 tick 的画面原样留着，这正是「迟滞」。
+            if (++holder.missTicks >= MISS_LIMIT) {
+                hide(holder);
+                return;
+            }
+            return;
+        } else {
+            // 射线落空但锁定目标还在（最常见：玩家把准心挪开了）：继续照它画，miss 计数清零。
+            holder.missTicks = 0;
+        }
+        BlockPos pos = holder.locked;   // 之后一律用锁定坐标，不再看瞬时射线结果
         String dimension = mc.level.dimension().identifier().toString();
-        ClientSnapshot.Tag tag = tagNear(Minecraft.getInstance(), pos);
+        ClientSnapshot.Tag tag = tagNear(mc, pos);
         // 锁定：暂存箱（只出不进）或自动档（分类由箱内内容决定）时**不允许手选分类**，
         // 下拉按钮置灰、展开也强制收起 —— 这就是「启动自动分配或选择暂存模式后不能再选其他标签」。
         boolean staging = tag != null && tag.staging;
@@ -509,6 +607,10 @@ public final class ContainerTagBar {
             b.visible = false;
         }
         holder.lastPos = null;
+        // 一并解锁：锁定坐标与 miss 计数归零，下一 tick 重新从射线取目标。
+        // 不清的话 hide() 之后 locked 还停在那只箱子上，下一次落空会被误判成「锁定还有效」。
+        holder.locked = null;
+        holder.missTicks = 0;
     }
 
     /** 玩家正看着的容器方块（客户端射线，不区分箱子/木桶/潜影盒/模组容器） */
@@ -524,6 +626,12 @@ public final class ContainerTagBar {
         }
         BlockPos pos = block.getBlockPos();
         return mc.level.getBlockEntity(pos) instanceof Container ? pos : null;
+    }
+
+    /** 这个坐标上现在还是不是一个容器方块（锁定的目标是否还有效） */
+    private static boolean isContainer(Minecraft mc, BlockPos pos) {
+        return mc != null && pos != null && mc.level != null
+                && mc.level.getBlockEntity(pos) instanceof Container;
     }
 
     private static String coords(BlockPos pos) {

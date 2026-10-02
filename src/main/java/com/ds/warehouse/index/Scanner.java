@@ -2,6 +2,7 @@ package com.ds.warehouse.index;
 
 import com.ds.warehouse.WarehouseMod;
 import com.ds.warehouse.config.AppConfig;
+import com.ds.warehouse.config.ContainerTags;
 import com.ds.warehouse.config.Region;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -565,6 +566,15 @@ public final class Scanner {
                 ContainerRecord rec = new ContainerRecord(dimensionOf(region), p.immutable(), blockId, size);
                 rec.doubleChest = second != null;
                 rec.partner = second == null ? null : partner.immutable();
+                if (rec.partner != null) {
+                    // 两个箱子刚拼成一只大箱子：它俩各自的标签键要并到这一对的正式键上（BUG3）。
+                    // 放在扫描里做，是因为「拼箱」本身没有事件，只能等下一轮扫到这一对时收口。
+                    ContainerTags.mergePair(rec.dimension, rec.pos, rec.partner);
+                } else if (partner != null) {
+                    // 搭档在区域外（双联箱跨区域边界）：索引记录仍按原样各记一半，但标签是全局的，
+                    // 两半的键照样要并到这一对的正式键上，否则两半会各显示一种分类（审查发现 4）。
+                    ContainerTags.mergePair(rec.dimension, rec.pos, partner);
+                }
                 for (int i = 0; i < firstSize; i++) {
                     ItemStack st = first.getItem(i);
                     if (st.isEmpty()) {

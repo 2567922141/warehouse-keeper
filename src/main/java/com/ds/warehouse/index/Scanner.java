@@ -4,13 +4,19 @@ import com.ds.warehouse.WarehouseMod;
 import com.ds.warehouse.config.AppConfig;
 import com.ds.warehouse.config.ContainerTags;
 import com.ds.warehouse.config.Region;
+import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -21,7 +27,12 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * 容器扫描器。
@@ -377,6 +388,83 @@ public final class Scanner {
         return rec;
     }
 
+    /**
+     * 读一格物品的附魔与自定义名，并进调用方给的「容器级」集合里（扫描时一个容器调一次，别每格一次跨对象提交）。
+     *
+     * <p>附魔同时读 {@code DataComponents.ENCHANTMENTS}（物品自己的附魔）与
+     * {@code DataComponents.STORED_ENCHANTMENTS}（附魔书把附魔存在这里），只读前者会漏掉整箱附魔书。
+     * 26.2 用的是 Mojang 官方映射：附魔是数据包动态注册表，{@code BuiltInRegistries} 里<b>没有</b>
+     * {@code ENCHANTMENT}，所以注册名只能走 {@code Holder.unwrapKey()} → {@code ResourceKey.identifier()}。
+     *
+     * @param enchantLevelsOut    附魔注册名（含命名空间）→ 等级，按「取最大」合并
+     * @param customNamesLowerOut 物品自定义名（已转小写）
+     */
+    public static void collectMeta(ItemStack stack, Map<String, Integer> enchantLevelsOut, Set<String> customNamesLowerOut) {
+        if (stack == null || stack.isEmpty()) {
+            return;
+        }
+        if (enchantLevelsOut != null) {
+            readEnchantments(stack.get(DataComponents.ENCHANTMENTS), enchantLevelsOut);
+            readEnchantments(stack.get(DataComponents.STORED_ENCHANTMENTS), enchantLevelsOut);
+        }
+        if (customNamesLowerOut != null) {
+            String name = customNameText(stack);
+            if (!name.isEmpty()) {
+                customNamesLowerOut.add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+    }
+
+    private static void readEnchantments(ItemEnchantments enchants, Map<String, Integer> out) {
+        if (enchants == null || enchants.isEmpty()) {
+            return;
+        }
+        for (Object2IntMap.Entry<Holder<Enchantment>> e : enchants.entrySet()) {
+            String id = enchantId(e.getKey());
+            int level = e.getIntValue();
+            if (id == null || level <= 0) {
+                continue;
+            }
+            out.merge(id, level, Math::max);
+        }
+    }
+
+    /** 附魔的注册名（{@code minecraft:sharpness} 这种）；拿不到注册键就返回 null */
+    private static String enchantId(Holder<Enchantment> holder) {
+        if (holder == null) {
+            return null;
+        }
+        return holder.unwrapKey().map(k -> k.identifier().toString()).orElse(null);
+    }
+
+    /** 物品自定义名的原文（没改过名就是空串） */
+    public static String customNameText(ItemStack stack) {
+        Component name = stack == null ? null : stack.get(DataComponents.CUSTOM_NAME);
+        return name == null ? "" : name.getString();
+    }
+
+    /**
+     * 一格物品的附魔文字：{@code 附魔注册名@等级} 用 {@code ,} 连接
+     * （例如 {@code minecraft:sharpness@5,minecraft:unbreaking@3}），无附魔是空串。
+     *
+     * <p>给网页 {@code /api/container} 与面板「容器详情」逐格用；顺序按附魔 id 排序，同一格每次看到的都一样。
+     */
+    public static String enchantText(ItemStack stack) {
+        Map<String, Integer> levels = new TreeMap<>();
+        collectMeta(stack, levels, null);
+        if (levels.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Integer> e : levels.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(e.getKey()).append('@').append(e.getValue());
+        }
+        return sb.toString();
+    }
+
     // ------------------------------------------------------------------
 
     private static final class Job {
@@ -583,6 +671,9 @@ public final class Scanner {
                     // 两半的键照样要并到这一对的正式键上，否则两半会各显示一种分类（审查发现 4）。
                     ContainerTags.mergePair(rec.dimension, rec.pos, partner);
                 }
+                // 附魔 / 自定义名：按容器先收一份，循环走完再一次性提交给索引（别每格跨对象调一次）
+                Map<String, Integer> metaEnchants = new TreeMap<>();
+                Set<String> metaNames = new LinkedHashSet<>();
                 for (int i = 0; i < firstSize; i++) {
                     ItemStack st = first.getItem(i);
                     if (st.isEmpty()) {
@@ -591,6 +682,7 @@ public final class Scanner {
                     rec.add(i, st.copy());
                     totalStacks++;
                     totalItems += st.getCount();
+                    collectMeta(st, metaEnchants, metaNames);
                 }
                 if (second != null) {
                     // 大箱子的槽位沿用游戏界面里的顺序：先界面前半的 0..n1-1，再后半的 n1..
@@ -602,9 +694,13 @@ public final class Scanner {
                         rec.add(firstSize + i, st.copy());
                         totalStacks++;
                         totalItems += st.getCount();
+                        collectMeta(st, metaEnchants, metaNames);
                     }
                 }
                 WarehouseMod.INDEX.accept(rec);
+                // accept() 自己也会按记录内容重算一遍（IndexRefresh 轮询那条路径只会调 accept），
+                // 这里按契约再提交一次「扫描时收集」的结果；两边内容一致、按最大值/并集合并，重复提交无副作用。
+                WarehouseMod.INDEX.addItemMeta(WarehouseIndex.key(rec.dimension, rec.pos), metaEnchants, metaNames);
                 scannedContainers++;
             }
         }

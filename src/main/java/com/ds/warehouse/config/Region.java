@@ -117,6 +117,45 @@ public class Region {
         return null;
     }
 
+    /**
+     * 缩小：朝一个方向缩掉 amount 格（{@link #grow} 的反向操作）。
+     *
+     * <p>方向遵循 Minecraft 惯例：north = -Z，south = +Z，west = -X，east = +X，
+     * down = -Y，up = +Y。也接受中文（北/南/西/东/下/上）和单字母缩写。
+     *
+     * <p>闭区间语义：每轴至少要留 1 格（下界 == 上界仍合法）。amount 不是正数、
+     * 方向不认识、或任何一轴缩成「上界 &lt; 下界」，都会整个失败并**不改动任何字段**。
+     * fullHeight = true 时 Y 轴不参与判定（见 {@link #contains}），但按 up/down 缩小
+     * 仍会照常改 min/max。
+     *
+     * @return null 表示成功，否则是失败原因的说明
+     */
+    public String shrink(String direction, int amount) {
+        String d = direction == null ? "" : direction.trim().toLowerCase(java.util.Locale.ROOT);
+        if (amount <= 0) {
+            return "缩小的格数必须是正整数（收到 " + amount + "）";
+        }
+        BlockPos lo = min();
+        BlockPos hi = max();
+        switch (d) {
+            case "north", "n", "北" -> lo = lo.offset(0, 0, amount);
+            case "south", "s", "南" -> hi = hi.offset(0, 0, -amount);
+            case "west", "w", "西" -> lo = lo.offset(amount, 0, 0);
+            case "east", "e", "东" -> hi = hi.offset(-amount, 0, 0);
+            case "down", "d", "下" -> lo = lo.offset(0, amount, 0);
+            case "up", "u", "上" -> hi = hi.offset(0, -amount, 0);
+            default -> {
+                return "无法识别的方向「" + direction + "」（可用 north/south/east/west/up/down，或 北/南/东/西/上/下）";
+            }
+        }
+        if (lo.getX() > hi.getX() || lo.getZ() > hi.getZ() || (!fullHeight && lo.getY() > hi.getY())) {
+            return "朝 " + d + " 缩小 " + amount + " 格后会剩不下空间（当前 " + describeSize() + "，每轴至少要留 1 格）";
+        }
+        from = new int[]{lo.getX(), lo.getY(), lo.getZ()};
+        to = new int[]{hi.getX(), hi.getY(), hi.getZ()};
+        return null;
+    }
+
     public long blockVolume() {
         BlockPos lo = min();
         BlockPos hi = max();

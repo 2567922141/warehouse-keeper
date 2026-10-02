@@ -591,6 +591,10 @@ public final class WebSnapshot {
         public final String name;
         public final int count;
         public final String category;
+        /** 自定义名原文（用铁砧 / 命名牌改过才有）；没有时是空串 */
+        public final String customName;
+        /** 附魔，形如 {@code minecraft:sharpness@5,minecraft:unbreaking@3}；没有时是空串 */
+        public final String ench;
 
         SlotRow(ContainerRecord.StoredStack ss) {
             this.slot = ss.slot();
@@ -598,6 +602,9 @@ public final class WebSnapshot {
             this.name = ss.stack().getHoverName().getString();
             this.count = ss.stack().getCount();
             this.category = Categories.of(id);
+            // 附魔 / 自定义名只有 ItemStack 上有，id + 数量之外的信息都从这里现取（优化11）
+            this.customName = Scanner.customNameText(ss.stack());
+            this.ench = Scanner.enchantText(ss.stack());
         }
     }
 

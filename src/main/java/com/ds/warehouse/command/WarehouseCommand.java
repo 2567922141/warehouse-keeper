@@ -57,6 +57,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -153,6 +154,8 @@ public final class WarehouseCommand {
                                         .then(Commands.literal("limited").executes(ctx -> setHeight(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name"), false)))))
                         .then(Commands.literal("grow").then(growNode()))
+                        // 优化8：缩小 = grow 的反向，且必须主动清理索引（被缩掉的箱子会移出索引）
+                        .then(Commands.literal("shrink").then(shrinkNode()))
                         .then(Commands.literal("merge")
                                 .then(Commands.argument("name", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
@@ -265,6 +268,22 @@ public final class WarehouseCommand {
                                     find(ctx.getSource(), StringArgumentType.getString(ctx, "item"));
                                     return 1;
                                 })))
+                .then(Commands.literal("enchants")
+                        .executes(ctx -> {
+                            enchants(ctx.getSource());
+                            return 1;
+                        })
+                        .then(Commands.literal("list").executes(ctx -> {
+                            enchants(ctx.getSource());
+                            return 1;
+                        }))
+                        .then(Commands.literal("find")
+                                .then(Commands.argument("query", StringArgumentType.greedyString())
+                                        .executes(ctx -> {
+                                            findEnchanted(ctx.getSource(),
+                                                    StringArgumentType.getString(ctx, "query"));
+                                            return 1;
+                                        }))))
                 .then(Commands.literal("categories")
                         .executes(ctx -> {
                             showCategories(ctx.getSource());
@@ -397,6 +416,16 @@ public final class WarehouseCommand {
                                                 .executes(ctx -> botAssign(ctx.getSource(),
                                                         StringArgumentType.getString(ctx, "name"),
                                                         StringArgumentType.getString(ctx, "region"))))))
+                        .then(Commands.literal("display")
+                                // 优化7：只改「显示名」，注册名（= Carpet 的身份）一律不动
+                                .then(Commands.argument("name", NameArgument.name())
+                                        .suggests(BOT_SUGGEST)
+                                        .executes(ctx -> botDisplay(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name"), null))
+                                        .then(Commands.argument("nick", StringArgumentType.greedyString())
+                                                .executes(ctx -> botDisplay(ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "name"),
+                                                        StringArgumentType.getString(ctx, "nick"))))))
                         .then(Commands.literal("here")
                                 .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
@@ -862,6 +891,11 @@ public final class WarehouseCommand {
         send(src, "搬运工名册 " + bots.size() + "/" + Bots.MAX + " 个");
         for (Bots.Entry e : bots) {
             StringBuilder sb = new StringBuilder("  ").append(e.name);
+            String disp = Bots.displayOf(e.name);
+            if (!disp.equals(e.name)) {
+                // 优化7：设了昵称就把昵称跟在注册名后面，注册名始终留着（它才是身份）
+                sb.append("（").append(disp).append("）");
+            }
             sb.append(" 值守 ").append(e.region == null || e.region.isEmpty() ? "未派" : e.region);
             String own = Bots.spotText(e.name);
             sb.append(" 值守点 ").append(own.isEmpty() ? "自动" : own + "（自定义）");
@@ -881,7 +915,67 @@ public final class WarehouseCommand {
             }
             send(src, sb.toString());
         }
-        send(src, "指令：/warehouse bot add|remove|assign|here|spot|spawn|kill|tidy|sweep|stop");
+        send(src, "指令：/warehouse bot add|remove|assign|display|here|spot|spawn|kill|tidy|sweep|stop");
+        return 1;
+    }
+
+    /**
+     * {@code /warehouse bot display <名字> [昵称]} —— 查看 / 设置搬运工的显示名。
+     *
+     * <p>优化7 的核心约束：**注册名是身份**（Carpet 按名字派生 UUID，无法改名），
+     * 所以昵称只做「给人看的那一层」，存在 {@code bots.json} 的 {@code display} 字段里；
+     * 所有指令、任务、冷却、事件仍然只用注册名。
+     */
+    private static int botDisplay(CommandSourceStack src, String name, String nick) {
+        Bots.Entry e = Bots.of(name);
+        if (e == null) {
+            send(src, "没有名为「" + name + "」的搬运工（用 /warehouse bot list 看名册）");
+            return 0;
+        }
+        if (nick == null) {
+            String now = Bots.displayOf(name);
+            if (now.equals(name)) {
+                send(src, "搬运工「" + name + "」没有设置显示名，面板里显示注册名。");
+                send(src, "设置：/warehouse bot display " + name + " <昵称>");
+            } else {
+                send(src, "搬运工「" + name + "」的显示名：" + now + "（注册名仍是 " + name + "）");
+            }
+            return 1;
+        }
+        String text = nick.trim();
+        // 清空：显式关键词或全空白都算「清除昵称」
+        boolean clear = text.isEmpty() || text.equalsIgnoreCase("clear") || text.equalsIgnoreCase("none")
+                || text.equals("清除") || text.equals("无");
+        if (clear) {
+            if (!Bots.setDisplay(name, null)) {
+                send(src, "搬运工「" + name + "」本来就没有显示名。");
+                return 1;
+            }
+            Bots.save();
+            Audit.add(adminName(src), "指挥搬运工", "清除搬运工「" + name + "」的显示名");
+            send(src, "已清除搬运工「" + name + "」的显示名，面板/网页恢复显示注册名。");
+            return 1;
+        }
+        if (text.length() > 24) {
+            send(src, "显示名最多 24 个字符（现在 " + text.length() + " 个）");
+            return 0;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            // 换行/制表符会打乱面板排版；§ 颜色代码会让按字符截断算不准宽度
+            if (c < 0x20 || c == 0x7F || c == '§') {
+                send(src, "显示名不能包含换行、制表符或颜色代码（§）");
+                return 0;
+            }
+        }
+        if (!Bots.setDisplay(name, text)) {
+            send(src, "搬运工「" + name + "」的显示名没有变化。");
+            return 1;
+        }
+        Bots.save();
+        Audit.add(adminName(src), "指挥搬运工", "把搬运工「" + name + "」的显示名设为「" + text + "」");
+        send(src, "已把搬运工「" + name + "」的显示名设为「" + text + "」。");
+        send(src, "注意：指令与任务仍然只用注册名 " + name + "；假人头顶名牌也还是注册名（原版无法改）。");
         return 1;
     }
 
@@ -1285,16 +1379,43 @@ public final class WarehouseCommand {
         return nameNode;
     }
 
+    /**
+     * 构建 {@code /warehouse region shrink <名字> [方向] [格数]} 里的「名字」参数节点。
+     *
+     * <p>参数结构与 {@link #growNode()} 完全对偶，只是方向列表同一份
+     * {@link #DIRECTIONS}（中文方向同样必须用 literal，理由见 growNode 的注释）。
+     */
+    private static RequiredArgumentBuilder<CommandSourceStack, String> shrinkNode() {
+        RequiredArgumentBuilder<CommandSourceStack, String> nameNode =
+                Commands.argument("name", NameArgument.name())
+                        .suggests(REGION_SUGGEST)
+                        // 不带方向 = 缩到「我现在站的区块」（X/Z 收到该区块的 16×16，Y 不变）
+                        .executes(ctx -> shrinkRegion(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "name"), null, 0));
+
+        for (String dir : DIRECTIONS) {
+            nameNode = nameNode.then(Commands.literal(dir)
+                    // 省略格数 = 缩 1 格
+                    .executes(ctx -> shrinkRegion(ctx.getSource(),
+                            StringArgumentType.getString(ctx, "name"), dir, 1))
+                    .then(Commands.argument("amount", IntegerArgumentType.integer(1, 4096))
+                            .executes(ctx -> shrinkRegion(ctx.getSource(),
+                                    StringArgumentType.getString(ctx, "name"), dir,
+                                    IntegerArgumentType.getInteger(ctx, "amount")))));
+        }
+        return nameNode;
+    }
+
     private static void help(CommandSourceStack src) {
         send(src, "===== warehouse-keeper =====");
         send(src, "用法：/warehouse <子命令> [参数]");
-        send(src, "仓库：pos1|pos2、region save/list/info/remove、region grow/merge/height");
-        send(src, "索引：scan、status、list、find、stats、save、load、clear、settings、categories");
-        send(src, "搬运工：porter / bot（add/remove/assign/here/spot/spawn/kill/tidy/sweep/stop）");
+        send(src, "仓库：pos1|pos2、region save/list/info/remove、region grow/shrink/merge/height");
+        send(src, "索引：scan、status、list、find、enchants [find <附魔或自定义名>]、stats、save、load、clear、settings、categories");
+        send(src, "搬运工：porter / bot（add/remove/assign/display/here/spot/spawn/kill/tidy/sweep/stop）");
         send(src, "取货与入库：order、give [all]、tidy、sweep");
         send(src, "标签：tag show/list/set/auto/staging/clear/mode/prune");
         send(src, "权限：user list/perm/log/migrate（仅管理员；改权限：take 取货 / bot 指挥 / tidy 整理）");
-        send(src, "修改性命令限管理员（OP）；普通玩家可用 status、list、find、stats、order、give、porter、tag。");
+        send(src, "修改性命令限管理员（OP）；普通玩家可用 status、list、find、enchants、stats、order、give、porter、tag。");
         send(src, "用法与示例见各子命令不带参数时的提示");
     }
 
@@ -1446,6 +1567,156 @@ public final class WarehouseCommand {
         send(src, "重新扫描后新容器才会进索引：/warehouse scan " + r.name);
         Audit.add(adminName(src), "改仓库", "把仓库「" + r.name + "」扩建到 " + r.describeCorners());
         return 1;
+    }
+
+    /**
+     * {@code /warehouse region shrink <名字> [方向] [格数]} —— 缩小仓库（优化8）。
+     *
+     * <p>与 {@link #growRegion} 的关键差别：扩建时「新进来的箱子还没扫到」无所谓，缩小却必须
+     * <b>主动把被缩掉的箱子移出索引</b>，否则查询 / 下单 / 整理会指向已经不属于本仓库的箱子。
+     * 这里把「旧范围 − 新范围」拆成最多 6 片 1 格厚的薄板（见 {@link #removedSlabs}）交给
+     * {@link WarehouseIndex#removeContainersIn(List)}，而**不用**「不在新范围里就删」的口径：
+     * 索引是全局的（含别的仓库、别的维度），那种口径会把别人的记录一起删掉。
+     *
+     * <p>不带方向 = 缩到「我现在站的区块」：新范围 = 旧范围 ∩ 我所在区块的 16×16（X/Z，Y 不变）。
+     * 取交集而不是直接把范围改成那个区块，是为了保证这个用法**只会缩小、绝不会偷偷扩大**。
+     */
+    private static int shrinkRegion(CommandSourceStack src, String rawName, String direction, int amount) {
+        Region r = lookupRegion(src, rawName);
+        if (r == null) {
+            return 0;
+        }
+        BlockPos oldLo = r.min();
+        BlockPos oldHi = r.max();
+        String before = r.describeCorners();
+        long volumeBefore = r.blockVolume();
+        boolean chunkMode = direction == null;
+
+        if (chunkMode) {
+            ServerPlayer p = src.getPlayer();
+            if (p == null) {
+                send(src, "该用法须在游戏内执行（要用到你所在的位置）。");
+                send(src, "控制台用法：/warehouse region shrink " + r.name + " <方向> <格数>");
+                return 0;
+            }
+            if (!sameDimension(r, p)) {
+                send(src, "你当前在" + Names.dimension(p.level().dimension().identifier().toString())
+                        + "，仓库 " + r.name + " 在" + Names.dimension(Scanner.dimensionOf(r)) + "，无法缩小。");
+                return 0;
+            }
+            BlockPos pp = p.blockPosition();
+            if (pp.getX() < oldLo.getX() || pp.getX() > oldHi.getX()
+                    || pp.getZ() < oldLo.getZ() || pp.getZ() > oldHi.getZ()) {
+                send(src, "你现在没站在仓库 " + r.name + " 里（它的 X " + oldLo.getX() + ".." + oldHi.getX()
+                        + "、Z " + oldLo.getZ() + ".." + oldHi.getZ() + "），无法「缩到我所站的区块」。");
+                return 0;
+            }
+            int cx = pp.getX() & ~15;
+            int cz = pp.getZ() & ~15;
+            int tx1 = Math.max(oldLo.getX(), cx);
+            int tx2 = Math.min(oldHi.getX(), cx + 15);
+            int tz1 = Math.max(oldLo.getZ(), cz);
+            int tz2 = Math.min(oldHi.getZ(), cz + 15);
+            // 交集一定合法（玩家在里面 ⇒ 非空），逐边收即可；先下界后上界，增量按旧范围算好
+            String err = shrinkEdge(r, "west", tx1 - oldLo.getX());
+            if (err == null) {
+                err = shrinkEdge(r, "north", tz1 - oldLo.getZ());
+            }
+            if (err == null) {
+                err = shrinkEdge(r, "east", oldHi.getX() - tx2);
+            }
+            if (err == null) {
+                err = shrinkEdge(r, "south", oldHi.getZ() - tz2);
+            }
+            if (err != null) {
+                // 理论上走不到：交集必然合法。真到了这里说明前置校验漏了，落盘并如实报告
+                RegionStore.save();
+                send(src, err);
+                send(src, "（仓库范围可能已被改动一部分，请用 /warehouse region info " + r.name + " 核对）");
+                return 0;
+            }
+        } else {
+            String err = r.shrink(direction, amount);
+            if (err != null) {
+                send(src, err);
+                return 0;
+            }
+        }
+
+        BlockPos lo = r.min();
+        BlockPos hi = r.max();
+        RegionStore.save();
+
+        List<Region> slabs = removedSlabs(r, oldLo, oldHi, lo, hi);
+        int removed = slabs.isEmpty() ? 0 : WarehouseMod.INDEX.removeContainersIn(slabs);
+        if (removed > 0) {
+            WarehouseMod.INDEX.reaggregate();
+        }
+
+        long volumeAfter = r.blockVolume();
+        send(src, "仓库 " + r.name + " 已缩小" + (chunkMode ? "（缩到你所站的区块）" : "") + "：");
+        send(src, "  原来  " + before);
+        send(src, "  现在  " + r.describeCorners()
+                + "（" + volumeAfter + " 方块，减少 " + Math.max(0, volumeBefore - volumeAfter) + "）");
+        if (volumeAfter == volumeBefore) {
+            send(src, "  （范围没变：要缩到的位置本来就在现在的边界上）");
+        } else if (removed > 0) {
+            send(src, "  有 " + removed + " 个容器被移出索引（箱子与箱内物品都还在原地，只是不再属于本仓库）。");
+        } else {
+            send(src, "  没有容器落在被缩掉的范围里，索引无需清理。");
+        }
+        if (r.fullHeight && !chunkMode) {
+            String d = direction.trim().toLowerCase(Locale.ROOT);
+            if (d.equals("up") || d.equals("u") || d.equals("上")
+                    || d.equals("down") || d.equals("d") || d.equals("下")) {
+                send(src, "  （全高度仓库的 Y 只作为记录保留、不参与判定，上下缩不影响哪些箱子算在内）");
+            }
+        }
+        Audit.add(adminName(src), "改仓库", "把仓库「" + r.name + "」缩小到 " + r.describeCorners()
+                + (chunkMode ? "（缩到所站区块）" : ""));
+        return 1;
+    }
+
+    /** 按方向缩一侧；{@code n <= 0} 表示这一侧不用动。返回 null 表示成功，否则是失败原因 */
+    private static String shrinkEdge(Region r, String direction, int n) {
+        return n <= 0 ? null : r.shrink(direction, n);
+    }
+
+    /**
+     * 把「旧范围 − 新范围」拆成最多 6 片 1 格厚的薄板（闭区间）。
+     *
+     * <p>拆法：X 两片用旧的 Y/Z 全幅；Z 两片用<b>新</b>的 X、旧的 Y 全幅；Y 两片用新的 X/Z。
+     * 三组并起来正好覆盖「本来在、现在不在」的部分，且 X/Z/Y 三组之间不重叠。
+     *
+     * <p>{@code fullHeight} 的仓库 Y 不参与判定，所以薄板要继承这一位、并**不生成** Y 薄板 ——
+     * 否则会把新范围正上方/正下方那些「按 fullHeight 仍属于本仓库」的箱子误删。
+     */
+    private static List<Region> removedSlabs(Region owner, BlockPos oldLo, BlockPos oldHi, BlockPos lo, BlockPos hi) {
+        List<Region> out = new ArrayList<>();
+        // X：西 / 东（用旧的 Y、Z 全幅）
+        addSlab(out, owner, oldLo.getX(), lo.getX() - 1, oldLo.getY(), oldHi.getY(), oldLo.getZ(), oldHi.getZ());
+        addSlab(out, owner, hi.getX() + 1, oldHi.getX(), oldLo.getY(), oldHi.getY(), oldLo.getZ(), oldHi.getZ());
+        // Z：北 / 南（用新的 X、旧的 Y 全幅，避开上面两片）
+        addSlab(out, owner, lo.getX(), hi.getX(), oldLo.getY(), oldHi.getY(), oldLo.getZ(), lo.getZ() - 1);
+        addSlab(out, owner, lo.getX(), hi.getX(), oldLo.getY(), oldHi.getY(), hi.getZ() + 1, oldHi.getZ());
+        // Y：下 / 上（用新的 X、Z；fullHeight 时整组跳过）
+        if (!owner.fullHeight) {
+            addSlab(out, owner, lo.getX(), hi.getX(), oldLo.getY(), lo.getY() - 1, lo.getZ(), hi.getZ());
+            addSlab(out, owner, lo.getX(), hi.getX(), hi.getY() + 1, oldHi.getY(), lo.getZ(), hi.getZ());
+        }
+        return out;
+    }
+
+    private static void addSlab(List<Region> out, Region owner,
+                                int x1, int x2, int y1, int y2, int z1, int z2) {
+        if (x1 > x2 || y1 > y2 || z1 > z2) {
+            return;
+        }
+        Region slab = new Region("tmp-slab", Scanner.dimensionOf(owner),
+                new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2));
+        // 判定语义必须与所属仓库一致：fullHeight 的仓库只看 X/Z
+        slab.fullHeight = owner.fullHeight;
+        out.add(slab);
     }
 
     /** /warehouse region merge <名字> —— 把当前 pos1..pos2 圈出来的范围并进已有仓库 */
@@ -1625,6 +1896,248 @@ public final class WarehouseCommand {
             send(src, "  " + ref.coordText() + "  槽位 " + ref.slot() + "  x" + ref.count()
                     + "  " + Names.block(ref.blockId()));
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 优化11：按附魔 / 自定义名搜索（索引新增的维度，需 0.22.0 重新扫描才有数据）
+
+    /**
+     * 常用中文附魔名 → 注册名。
+     *
+     * <p>只做「让人打得出来」这一件事：注册名永远是权威，认不出的输入直接按注册名走。
+     * 专用服务端的语言多半是 en_us，服务端拿不到中文显示名，所以这张表是必要的。
+     */
+    private static final Map<String, String> ENCHANT_ALIASES = Map.ofEntries(
+            Map.entry("保护", "minecraft:protection"),
+            Map.entry("火焰保护", "minecraft:fire_protection"),
+            Map.entry("摔落保护", "minecraft:feather_falling"),
+            Map.entry("摔落缓冲", "minecraft:feather_falling"),
+            Map.entry("爆炸保护", "minecraft:blast_protection"),
+            Map.entry("弹射物保护", "minecraft:projectile_protection"),
+            Map.entry("水下呼吸", "minecraft:respiration"),
+            Map.entry("水下速掘", "minecraft:aqua_affinity"),
+            Map.entry("荆棘", "minecraft:thorns"),
+            Map.entry("深海探索者", "minecraft:depth_strider"),
+            Map.entry("冰霜行者", "minecraft:frost_walker"),
+            Map.entry("绑定诅咒", "minecraft:binding_curse"),
+            Map.entry("灵魂疾行", "minecraft:soul_speed"),
+            Map.entry("迅捷潜行", "minecraft:swift_sneak"),
+            Map.entry("锋利", "minecraft:sharpness"),
+            Map.entry("亡灵杀手", "minecraft:smite"),
+            Map.entry("节肢杀手", "minecraft:bane_of_arthropods"),
+            Map.entry("击退", "minecraft:knockback"),
+            Map.entry("火焰附加", "minecraft:fire_aspect"),
+            Map.entry("抢夺", "minecraft:looting"),
+            Map.entry("横扫之刃", "minecraft:sweeping_edge"),
+            Map.entry("效率", "minecraft:efficiency"),
+            Map.entry("精准采集", "minecraft:silk_touch"),
+            Map.entry("耐久", "minecraft:unbreaking"),
+            Map.entry("时运", "minecraft:fortune"),
+            Map.entry("力量", "minecraft:power"),
+            Map.entry("冲击", "minecraft:punch"),
+            Map.entry("火矢", "minecraft:flame"),
+            Map.entry("无限", "minecraft:infinity"),
+            Map.entry("海之眷顾", "minecraft:luck_of_the_sea"),
+            Map.entry("饵钓", "minecraft:lure"),
+            Map.entry("忠诚", "minecraft:loyalty"),
+            Map.entry("穿刺", "minecraft:impaling"),
+            Map.entry("激流", "minecraft:riptide"),
+            Map.entry("引雷", "minecraft:channeling"),
+            Map.entry("多重射击", "minecraft:multishot"),
+            Map.entry("快速装填", "minecraft:quick_charge"),
+            Map.entry("穿透", "minecraft:piercing"),
+            Map.entry("经验修补", "minecraft:mending"),
+            Map.entry("消失诅咒", "minecraft:vanishing_curse"),
+            Map.entry("密度", "minecraft:density"),
+            Map.entry("致密", "minecraft:density"),
+            Map.entry("破甲", "minecraft:breach"),
+            Map.entry("突进", "minecraft:lunge"),
+            Map.entry("风爆", "minecraft:wind_burst"));
+
+    /** {@code /warehouse enchants [list]} —— 索引里出现过哪些附魔 */
+    private static void enchants(CommandSourceStack src) {
+        WarehouseIndex idx = WarehouseMod.INDEX;
+        if (idx.items.isEmpty()) {
+            send(src, noIndex());
+            return;
+        }
+        Set<String> ids = idx.enchantIds();
+        if (ids.isEmpty()) {
+            send(src, "索引里还没有附魔信息（0.21.0 及更早保存的索引不含这一维度，或者还没扫到带附魔的箱子）。");
+            send(src, "重新执行 /warehouse scan <仓库名> 之后就能按附魔搜索。");
+            return;
+        }
+        List<String> sorted = new ArrayList<>(ids);
+        sorted.sort(Comparator.comparingInt((String id) -> idx.enchantHits(id).size()).reversed()
+                .thenComparing(id -> id));
+        send(src, "===== 索引里的附魔（" + sorted.size() + " 种）=====");
+        for (String id : sorted) {
+            send(src, "  " + id + cnNameOf(id) + "  " + idx.enchantHits(id).size() + " 个容器");
+        }
+        send(src, "用法：/warehouse enchants find <附魔 id 或中文名>（也可以直接按箱子的自定义名找）");
+    }
+
+    /** {@code /warehouse enchants find <附魔或自定义名>} */
+    private static void findEnchanted(CommandSourceStack src, String query) {
+        WarehouseIndex idx = WarehouseMod.INDEX;
+        if (idx.items.isEmpty()) {
+            send(src, noIndex());
+            return;
+        }
+        String raw = query == null ? "" : query.trim();
+        if (raw.isEmpty()) {
+            send(src, "用法：/warehouse enchants find <附魔 id 或中文名>");
+            return;
+        }
+        List<String> ids = enchantCandidates(idx, raw);
+        if (ids.size() > 1) {
+            send(src, "「" + raw + "」匹配到 " + ids.size() + " 种附魔，请用完整 id：");
+            for (String id : ids) {
+                send(src, "  " + id + cnNameOf(id) + "  " + idx.enchantHits(id).size() + " 个容器");
+            }
+            return;
+        }
+        if (ids.isEmpty()) {
+            if (findNamed(src, idx, raw)) {
+                return;
+            }
+            send(src, "没认出附魔「" + raw + "」。可以直接用注册名（例如 minecraft:sharpness），"
+                    + "或用 /warehouse enchants list 看看索引里有哪些。");
+            return;
+        }
+        String id = ids.get(0);
+        Map<String, Integer> hits = idx.enchantHits(id);
+        if (hits.isEmpty()) {
+            send(src, "索引里没有 " + id + cnNameOf(id) + " 的记录。");
+            if (idx.enchantIds().isEmpty()) {
+                send(src, "当前索引不含附魔信息（旧索引），重新 /warehouse scan <仓库名> 后再试。");
+            }
+            return;
+        }
+        List<Map.Entry<String, Integer>> rows = new ArrayList<>(hits.entrySet());
+        rows.sort(Comparator.comparingInt((Map.Entry<String, Integer> en) -> en.getValue()).reversed()
+                .thenComparing(Map.Entry::getKey));
+        send(src, "===== 附魔搜索：" + id + cnNameOf(id) + " =====");
+        send(src, "带这件附魔的容器 " + rows.size() + " 个：");
+        int shown = 0;
+        for (Map.Entry<String, Integer> en : rows) {
+            if (shown++ >= 30) {
+                send(src, "  ...（还有 " + (rows.size() - 30) + " 个）");
+                break;
+            }
+            ContainerRecord rec = idx.containers.get(en.getKey());
+            if (rec == null) {
+                continue;
+            }
+            send(src, "  " + Names.dimension(rec.dimension) + "  " + rec.coordText()
+                    + "  " + Names.block(rec.blockId) + "  等级 " + en.getValue()
+                    + "  仓库 " + regionsAt(rec));
+        }
+    }
+
+    /** 按箱子上的自定义名找（附魔搜索的姊妹功能，同一套索引） */
+    private static boolean findNamed(CommandSourceStack src, WarehouseIndex idx, String query) {
+        String q = query.toLowerCase(Locale.ROOT);
+        Map<String, Set<String>> matched = new LinkedHashMap<>();
+        for (String name : idx.customNames()) {
+            if (name == null || !name.contains(q)) {
+                continue;
+            }
+            Set<String> keys = idx.customNameHits(name);
+            if (!keys.isEmpty()) {
+                matched.put(name, keys);
+            }
+        }
+        if (matched.isEmpty()) {
+            return false;
+        }
+        send(src, "===== 自定义名搜索：" + query + " =====");
+        for (Map.Entry<String, Set<String>> en : matched.entrySet()) {
+            send(src, "「" + en.getKey() + "」" + en.getValue().size() + " 个容器：");
+            int shown = 0;
+            for (String key : en.getValue()) {
+                if (shown++ >= 10) {
+                    send(src, "  ...（还有 " + (en.getValue().size() - 10) + " 个）");
+                    break;
+                }
+                ContainerRecord rec = idx.containers.get(key);
+                if (rec == null) {
+                    continue;
+                }
+                send(src, "  " + Names.dimension(rec.dimension) + "  " + rec.coordText()
+                        + "  " + Names.block(rec.blockId) + "  仓库 " + regionsAt(rec));
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 把用户输入折算成候选附魔 id。
+     *
+     * <p>顺序：中文别名 → 带命名空间的原样 → 补 minecraft: 的精确匹配 → 按「路径」模糊匹配。
+     * 返回空表表示「不是附魔」，多于一条表示有歧义（调用方负责让用户挑）。
+     */
+    private static List<String> enchantCandidates(WarehouseIndex idx, String input) {
+        String trimmed = input.trim();
+        String alias = ENCHANT_ALIASES.get(trimmed);
+        if (alias != null) {
+            return List.of(alias);
+        }
+        Set<String> known = idx.enchantIds();
+        String q = trimmed.toLowerCase(Locale.ROOT);
+        if (q.indexOf(':') >= 0) {
+            return List.of(q);
+        }
+        String namespaced = "minecraft:" + q;
+        if (known.contains(namespaced)) {
+            return List.of(namespaced);
+        }
+        if (known.contains(q)) {
+            return List.of(q);
+        }
+        List<String> fuzzy = new ArrayList<>();
+        for (String id : known) {
+            int sep = id.indexOf(':');
+            String path = sep < 0 ? id : id.substring(sep + 1);
+            // 先精确、再后缀、最后子串；同一条只加一次
+            if (path.equals(q) || path.endsWith("_" + q) || path.contains(q)) {
+                fuzzy.add(id);
+            }
+        }
+        fuzzy.sort(Comparator.comparingInt((String id) -> {
+            int sep = id.indexOf(':');
+            String path = sep < 0 ? id : id.substring(sep + 1);
+            if (path.equals(q)) {
+                return 0;
+            }
+            return path.endsWith("_" + q) ? 1 : 2;
+        }).thenComparing(id -> id));
+        return fuzzy;
+    }
+
+    /** 附魔 id 对应的中文别名（「（锋利）」），没登记就返回空串 */
+    private static String cnNameOf(String enchantId) {
+        for (Map.Entry<String, String> en : ENCHANT_ALIASES.entrySet()) {
+            if (en.getValue().equals(enchantId)) {
+                return "（" + en.getKey() + "）";
+            }
+        }
+        return "";
+    }
+
+    /** 这个容器落在哪些仓库里（一个容器可能同时被多个仓库圈住） */
+    private static String regionsAt(ContainerRecord rec) {
+        StringBuilder sb = new StringBuilder();
+        for (Region r : RegionStore.REGIONS.values()) {
+            if (rec.dimension == null || !rec.dimension.equals(r.dimension) || !r.contains(rec.pos)) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append("、");
+            }
+            sb.append(r.name);
+        }
+        return sb.length() == 0 ? "（不属于任何仓库）" : sb.toString();
     }
 
     private static void showStats(CommandSourceStack src) {

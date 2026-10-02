@@ -23,9 +23,13 @@ import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 索引持久化。
@@ -34,9 +38,10 @@ import java.util.Map;
  * （0.15.x 及以前放在 index/&lt;存档目录名&gt;.json，进存档时会自动迁移过来）
  * 刻意**不放进 world/** —— 卸载模组后存档零残留，这是本项目第一号硬性约束。
  *
- * 只保存索引真正用到的信息（物品 id + 数量），不序列化 ItemStack：
+ * 只保存索引真正用到的信息（物品 id + 数量 + 附魔 / 自定义名索引），不序列化 ItemStack：
  *   - ItemStack 的组件 / NBT 用 Gson 直接序列化既脆弱又没必要；
- *   - 索引本身就是按「物品 id」聚合的，附魔之类的差异本来就不区分。
+ *   - 按物品 id 聚合的 items 汇总仍然不区分附魔（口径没变），但「哪个箱子有哪本附魔书 /
+ *     哪个箱子里有改过名的物品」另存两张小表（format 2 起：enchants / customNames）。
  *
  * 每个存档一份，而且文件所在目录就是按存档分的。开档时还会校验文件里记录的
  * worldPath 与当前存档一致，不一致就忽略（双保险，避免 A 存档的数据串到 B 存档里）。
@@ -45,8 +50,11 @@ public final class IndexStore {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
 
-    /** 存档格式版本；以后改结构时 +1，旧文件会被忽略并提示重扫 */
-    private static final int FORMAT = 2;
+    /** 存档格式版本；以后改结构时 +1。format 3：新增附魔 / 自定义名两张小表 */
+    private static final int FORMAT = 3;
+
+    /** format 2：没有附魔 / 自定义名两张表。容器与分类照常读，只是「按附魔搜」要重新扫描 */
+    private static final int FORMAT_NO_META = 2;
 
     /** format 1：没有 categories 字段。仍然读得进来（分类现算），读之前先备份一份 index.v1.bak */
     private static final int FORMAT_LEGACY = 1;
@@ -96,6 +104,19 @@ public final class IndexStore {
         }
         dto.categories = Categories.snapshot();
         dto.categoriesRules = CategoryRules.VERSION;
+        // 附魔 / 自定义名索引（format 2 起）：附魔 id → (容器 key → 该容器里的最高等级)，
+        // 自定义名（小写）→ 出现过这个名字的容器 key。用索引自己的查询方法重建，
+        // 落盘顺序天然稳定（enchantIds()/customNames() 都是排好序的）。
+        Map<String, Map<String, Integer>> enchDto = new LinkedHashMap<>();
+        for (String enchantId : index.enchantIds()) {
+            enchDto.put(enchantId, index.enchantHits(enchantId));
+        }
+        dto.enchants = enchDto;
+        Map<String, Set<String>> nameDto = new LinkedHashMap<>();
+        for (String name : index.customNames()) {
+            nameDto.put(name, index.customNameHits(name));
+        }
+        dto.customNames = nameDto;
         dto.containers = new ArrayList<>(index.containers.size());
         for (ContainerRecord rec : index.containers.values()) {
             ContainerDto cd = new ContainerDto();
@@ -165,7 +186,7 @@ public final class IndexStore {
             lastLoadNote = "索引文件为空或格式不符";
             return lastLoadNote;
         }
-        if (dto.format != FORMAT && dto.format != FORMAT_LEGACY) {
+        if (dto.format != FORMAT && dto.format != FORMAT_NO_META && dto.format != FORMAT_LEGACY) {
             lastLoadNote = "索引文件为旧格式 (format=" + dto.format + ")，已忽略；请重新执行 /warehouse scan";
             return lastLoadNote;
         }
@@ -183,6 +204,10 @@ public final class IndexStore {
                 WarehouseMod.LOGGER.warn("[warehouse-keeper] 旧索引备份失败: {}", e.toString());
             }
         }
+        // format 2 的旧索引能照常用（容器 / 分类都在），只是没有附魔 / 自定义名这两张表
+        String noMeta = dto.format == FORMAT_NO_META
+                ? "，旧索引不含附魔 / 自定义名（要按附魔搜索请重新 /warehouse scan）"
+                : "";
         String world = worldPath(server);
         if (dto.worldPath != null && !dto.worldPath.equals(world)) {
             lastLoadNote = "索引文件属于另一个存档，已忽略";
@@ -190,6 +215,21 @@ public final class IndexStore {
         }
 
         index.clear();
+        // 附魔 / 自定义名是 id+count 之外的组件信息，落盘时单独存成两张小表；
+        // 这里先把「名字 → 容器」翻回「容器 → 名字」，附魔那边按容器 key 直接取。
+        Map<String, Set<String>> namesByContainer = new LinkedHashMap<>();
+        if (dto.customNames != null) {
+            for (Map.Entry<String, Set<String>> e : dto.customNames.entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    continue;
+                }
+                for (String containerKey : e.getValue()) {
+                    if (containerKey != null) {
+                        namesByContainer.computeIfAbsent(containerKey, k -> new HashSet<>()).add(e.getKey());
+                    }
+                }
+            }
+        }
         int ignoredItems = 0;
         for (ContainerDto cd : dto.containers) {
             if (cd == null) {
@@ -219,6 +259,12 @@ public final class IndexStore {
                 }
             }
             index.accept(rec); // accept() 会重算 scannedContainers / totalStacks / totalItems
+            // accept() 里的附魔 / 自定义名是按 ItemStack 现算的，而这里按 id+count 重建的 ItemStack
+            // 没有组件（附魔、自定义名都不在 id+count 里），所以必须从 DTO 灌回去。
+            String ckey = WarehouseIndex.key(rec.dimension, rec.pos);
+            index.addItemMeta(ckey,
+                    dto.enchants == null ? null : dto.enchants.get(ckey),
+                    namesByContainer.get(ckey));
         }
         index.scannedChunks = dto.scannedChunks;
         index.skippedChunks = dto.skippedChunks;
@@ -241,6 +287,7 @@ public final class IndexStore {
                         ? "，分类表 " + Categories.memoSize() + " 条"
                         : "，分类表规则版本不符，将在用到时现算")
                 + upgraded
+                + noMeta
                 + (ignoredItems > 0 ? "，有 " + ignoredItems + " 个物品在当前整合包里不存在，已跳过" : "");
         WarehouseMod.LOGGER.info("[warehouse-keeper] {}", lastLoadNote);
         return null;
@@ -316,6 +363,10 @@ public final class IndexStore {
         Map<String, String> categories;
         /** 落盘时分类规则表的版本；与当前 CategoryRules.VERSION 不一致时不敢用这张表（怕规则改过留陈旧值） */
         int categoriesRules;
+        /** format 2 起：附魔注册名 → （容器 key → 该容器里的最高等级）；老文件没有这个字段时按空表处理 */
+        Map<String, Map<String, Integer>> enchants;
+        /** format 2 起：物品自定义名（小写）→ 带这个名字的容器 key；老文件没有这个字段时按空表处理 */
+        Map<String, Set<String>> customNames;
     }
 
     private static final class ContainerDto {

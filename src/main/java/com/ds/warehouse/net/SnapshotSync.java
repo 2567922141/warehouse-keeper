@@ -156,7 +156,7 @@ public final class SnapshotSync {
     }
 
     /**
-     * 便宜的变化检测：仓库定义 + 假人名册（值守仓库 / 自定义值守点）+ 账号权限。
+     * 便宜的变化检测：仓库定义 + 假人名册（值守仓库 / 自定义值守点 / 显示名）+ 账号权限。
      *
      * <p>刻意**不含**假人当前在忙什么 —— 那玩意儿每几秒就变，会让快照一路刷包；
      * 忙碌状态跟着下一次真正的变化一起发出去就够了。
@@ -174,6 +174,10 @@ public final class SnapshotSync {
         for (Bots.Entry e : Bots.list()) {
             sb.append(e.name).append('@').append(e.region == null ? "" : e.region)
                     .append('#').append(Bots.spotText(e.name))
+                    // 显示名也是签名的一部分：改了昵称，面板必须立刻刷新。
+                    // 用 displayOf（已回落成注册名）而不是 e.display：null 与「等于注册名」在界面上
+                    // 是同一个结果，归一化后不会因为两种写法各刷一次包。
+                    .append("/D:").append(Bots.displayOf(e.name))
                     // 在忙什么（整理 / 送货 / 闲置）也算签名的一部分：状态一变面板就要刷，
                     // 但刻意不含进度百分比（那东西几秒就变一次，会让快照一路推包）
                     .append("/B:").append(busyKind(e.name)).append('|');
@@ -323,6 +327,8 @@ public final class SnapshotSync {
         for (Bots.Entry e : Bots.list()) {
             BotDto bot = new BotDto();
             bot.name = e.name;
+            // 显示名：只给界面看，服务端已经回落成注册名（没设昵称时两者相同）
+            bot.display = Bots.displayOf(e.name);
             bot.region = e.region == null ? "" : e.region;
             bot.spot = Bots.spotText(e.name);
             String kind = Tasks.busy(e.name) ? Tasks.kindOf(e.name) : null;
@@ -558,7 +564,15 @@ public final class SnapshotSync {
     }
 
     static final class BotDto {
+        /** 注册名：Carpet 身份、指令、过滤 / 跳转一律用它，语义不变 */
         String name;
+        /**
+         * 显示名（JSON 字段名 {@code display}，只用于「给人看」的地方）。
+         *
+         * <p>服务端已经回落好了：设过昵称就是昵称，没设过（或名册里没这个人）就是 {@link #name}，
+         * 所以客户端拿到的一定是非 null 的可显示字符串。
+         */
+        public String display = "";
         String region;
         /** "x,y,z"；空 = 自动判定 */
         String spot;

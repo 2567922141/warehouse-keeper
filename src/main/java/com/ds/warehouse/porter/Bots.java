@@ -48,6 +48,18 @@ public final class Bots {
         public String region = "";
 
         /**
+         * 显示名（昵称）——**只影响界面显示**，不动 {@link #name}：注册名还是
+         * {@code WarehouseBot}，Carpet 的身份（按名字派生的离线 UUID）也不变，
+         * 所以指令、按键、过滤一律照旧用 {@code name}，只有给人看的地方读这个字段。
+         *
+         * <p>{@code null} / 空串 = 没起昵称，界面回落显示注册名；读取请走
+         * {@link #displayOf(String)}（它保证返回非 null 的可显示字符串）。
+         * <p>老版本的 bots.json 里没有这个字段，Gson 读进来就是 {@code null}，
+         * 所有读取路径都按 null 安全处理，所以升级不会坏档、也不需要迁移。
+         */
+        public String display;
+
+        /**
          * 自定义值守点（{@code /warehouse bot spot <名字>} 设的那个）。
          *
          * <p>{@code homeDim} 为空串 = 没设过，值守点按 {@link com.ds.warehouse.porter.Body#standby}
@@ -110,6 +122,12 @@ public final class Bots {
                     for (Entry e : d.bots) {
                         if (e != null && e.name != null && !e.name.isEmpty()) {
                             e.region = e.region == null ? "" : e.region;
+                            // 显示名归一化：老档缺字段 = null，手改档留下的空串/纯空白也一律变 null，
+                            // 内存里就只有「null = 没昵称」一种表示，后面所有读取处都不必再判空串。
+                            if (e.display != null) {
+                                String text = e.display.trim();
+                                e.display = text.isEmpty() ? null : text;
+                            }
                             LIST.add(e);
                         }
                     }
@@ -156,6 +174,9 @@ public final class Bots {
         for (Entry e : LIST) {
             java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
             m.put("name", e.name);
+            // 显示名（昵称）：没设过就是注册名本身，所以这里永远可以直接拿去显示；
+            // name 仍是注册名 —— 过滤 / 查找 / 跳转 / 指令都用它，语义不变。
+            m.put("display", displayOf(e.name));
             m.put("region", e.region);
             // 空串 = 自动判定；有值 = 自定义值守点（形如 "15,-60,4"）
             m.put("spot", spotText(e.name));
@@ -190,6 +211,53 @@ public final class Bots {
     public static String regionOf(String name) {
         Entry e = of(name);
         return e == null ? null : e.region;
+    }
+
+    // ------------------------------------------------------------------
+    // 显示名（昵称）：只影响「给人看」的文字，绝不参与身份
+
+    /**
+     * 这个假人界面上该显示的名字。
+     *
+     * <p>设过昵称就是昵称，没设过（或名册里根本没这个人）就是**注册名本身** ——
+     * 所以调用方（指令反馈 / 面板 / JSON）拿到的永远是非 null 的可显示字符串，
+     * 不需要自己判空。{@code name} 为 null 时返回空串。
+     */
+    public static String displayOf(String name) {
+        if (name == null) {
+            return "";
+        }
+        Entry e = of(name);
+        if (e == null || e.display == null || e.display.isBlank()) {
+            return name;
+        }
+        return e.display;
+    }
+
+    /**
+     * 设这个假人的**显示名**（昵称）。
+     *
+     * <p>只写 {@link Entry#display}：注册名、Carpet 按名字派生的 UUID、指令里的名字全都不变，
+     * 所以不存在身份迁移的问题。
+     *
+     * <p>{@code display} 传 null 或全空白 = 清除昵称（存 null），界面回落显示注册名。
+     * 值不变时不标脏，避免白写一次 bots.json。
+     *
+     * @return false = 名册里没这个假人（什么都没做）
+     */
+    public static boolean setDisplay(String name, String display) {
+        Entry e = of(name);
+        if (e == null) {
+            return false;
+        }
+        String trimmed = display == null ? "" : display.trim();
+        String next = trimmed.isEmpty() ? null : trimmed;
+        boolean changed = next == null ? e.display != null : !next.equals(e.display);
+        if (changed) {
+            e.display = next;
+            dirty = true;
+        }
+        return true;
     }
 
     /** @return 这个假人自己设过的值守点；没设过（或没有这个假人）就是 null */

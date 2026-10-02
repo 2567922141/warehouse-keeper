@@ -12,6 +12,7 @@ import com.ds.warehouse.index.IndexRefresh;
 import com.ds.warehouse.index.Scanner;
 import com.ds.warehouse.index.WarehouseIndex;
 import com.ds.warehouse.util.Categories;
+import com.ds.warehouse.util.CreativeOrder;
 import com.ds.warehouse.util.Names;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
@@ -19,10 +20,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
-import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.levelgen.Heightmap;
-import net.minecraft.world.phys.AABB;
 
 import java.text.Collator;
 import java.util.ArrayList;
@@ -38,12 +36,10 @@ import java.util.Set;
 /**
  * 假人能干的「活」——取货送货之外的批量任务。
  *
- * <p>目前两种：
- * <ul>
- *   <li>{@link #TIDY} 整理仓库：把同一个箱子里同种物品的零碎堆叠合并到一格；
- *       把放错箱子的物品搬回它「家」（{@link Homes} 记住的那个箱子）。</li>
- *   <li>{@link #SWEEP} 清扫地面：按网格把仓库区域走一遍，把地上的掉落物捡回来归仓。</li>
- * </ul>
+ * <p>目前只有一种：{@link #TIDY} 整理仓库 —— 把同一个箱子里同种物品的零碎堆叠合并到一格；
+ * 把放错箱子的物品搬回它「家」（{@link Homes} 记住的那个箱子）。
+ *
+ * <p>（优化4）原先还有「清扫地面」任务，已随「删除自动拾取仓库范围内掉落物」一起下线。
  *
  * <p>每个假人各自一份任务（{@link #JOBS}），只在服务端 tick 线程上跑；
  * 网页/GUI 读的是 {@link #snapshot()} 这份只读快照。
@@ -55,17 +51,18 @@ import java.util.Set;
 public final class Tasks {
 
     public static final int TIDY = 0;
+    /**
+     * 清扫地面任务（优化4 已下线）。
+     *
+     * <p>常量留着只是为了让还在引用它的命令层节点（{@code command/WarehouseCommand.java} 的
+     * {@code porter sweep} / {@code bot sweep}）仍然能编译；{@link #start} 会直接拒绝这个类型并
+     * 回一句说明，{@link #kindName} 也不再给它名字。等命令层的节点删掉后这个常量可以一起删。
+     */
     public static final int SWEEP = 1;
-    /** 一个任务最多做多少步，防止异常情况下无休止地干下去（清扫用；整理改用「时间 + 件数」双上限，批次 1 · B2） */
-    public static final int MAX_STEPS = 400;
-    /** 整理：一个任务最多跑多久（批次 1 · B2，取代 400 步上限） */
+    /** 整理：一个任务最多跑多久（批次 1 · B2） */
     private static final long JOB_NANOS = 10L * 60L * 1_000_000_000L;
     /** 整理：一个任务最多搬多少件（批次 1 · B2） */
     private static final int JOB_MOVES = 50_000;
-    /** 清扫时的网格间距（格） */
-    private static final int SWEEP_STEP = 6;
-    /** 假人背包里攒到这么多格东西就先送回仓库 */
-    private static final int DUMP_AT = 24;
     /** 整理预览一次最多看多少只箱子（预览是同步跑的，整仓一眼扫完会把主线程占住 · A1-b） */
     private static final int PREVIEW_LIMIT = 256;
     /**
@@ -85,10 +82,12 @@ public final class Tasks {
     private static final Collator PINYIN = Collator.getInstance(Locale.CHINA);
 
     /**
-     * 箱内排序：按物品显示名的拼音先后（首字 → 次字 → …）。
+     * 箱内排序的兜底比较：按物品显示名的拼音先后（首字 → 次字 → …）。
      *
-     * <p>名字取 {@link Names#item(String)}（服务端能解析出中文就用中文，解析不出来会退回物品 id），
-     * 所以最坏情况也不会乱：只是退回「按 id 排」的老行为。同音同名时再用物品 id 兜底，保证顺序稳定。
+     * <p>（优化2）箱内排序的主键已经换成「创造栏顺序」（见 {@link CreativeOrder}）；
+     * 只有**不在任何创造栏页签里**的物品才落到这条规则上。名字取 {@link Names#item(String)}
+     * （服务端能解析出中文就用中文，解析不出来会退回物品 id），所以最坏情况也不会乱：
+     * 只是退回「按 id 排」的老行为。同音同名时再用物品 id 兜底，保证顺序稳定。
      */
     private static int byPinyin(String idA, String idB) {
         synchronized (PINYIN) {
@@ -97,10 +96,71 @@ public final class Tasks {
         }
     }
 
+    /**
+     * 有创造栏顺序的物品一律排在没顺序的前面，所以没顺序的那批从 2^32 起编号
+     * （创造栏顺序号是 int，远小于它；见 {@link #sortKeysOf}）。
+     */
+    private static final long UNRANKED_BASE = 1L << 32;
+
+    /**
+     * （优化2）给这一箱用到的每个物品 id 算一个排序键，**一只箱子只算一次**。
+     *
+     * <p>三级键：
+     * <ol>
+     *   <li>创造栏里有位置的（{@link CreativeOrder#rank} ≥ 0）按顺序号升序排在最前面；</li>
+     *   <li>不在任何 CATEGORY 页签里的（模组调试/占位物品之类）一律排在后面；</li>
+     *   <li>第二批内部按原来的拼音（同音退化成物品 id）定序 —— 先给它们排一次序再编号，
+     *       保证顺序确定，也避免选择排序每比一次都去查 map + 比拼音（原来一只箱子要
+     *       O(n²) 次拼音比较，现在只有一次 O(m log m)）。</li>
+     * </ol>
+     */
+    private static Map<String, Long> sortKeysOf(List<ItemStack> items) {
+        List<String> ids = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (ItemStack s : items) {
+            if (s.isEmpty()) {
+                continue;
+            }
+            String id = ItemIds.of(s);
+            if (id != null && seen.add(id)) {
+                ids.add(id);
+            }
+        }
+        Map<String, Long> keys = new HashMap<>(Math.max(4, ids.size() * 2));
+        List<String> unranked = new ArrayList<>();
+        for (String id : ids) {
+            int r = CreativeOrder.rank(id);
+            if (r >= 0) {
+                keys.put(id, (long) r);
+            } else {
+                unranked.add(id);
+            }
+        }
+        if (!unranked.isEmpty()) {
+            unranked.sort(Tasks::byPinyin);
+            for (int i = 0; i < unranked.size(); i++) {
+                keys.put(unranked.get(i), UNRANKED_BASE + i);
+            }
+        }
+        return keys;
+    }
+
+    /** 比两个 id 的排序键；键缺失（理论上不会）时退回拼音比较，保证任何情况下顺序都确定 */
+    private static int compareKeys(Map<String, Long> keys, String a, String b) {
+        Long ka = keys.get(a);
+        Long kb = keys.get(b);
+        if (ka == null || kb == null) {
+            if (ka == null && kb == null) {
+                return byPinyin(a, b);
+            }
+            return ka == null ? 1 : -1;
+        }
+        return Long.compare(ka, kb);
+    }
+
     public static String kindName(int kind) {
         return switch (kind) {
             case TIDY -> "整理仓库";
-            case SWEEP -> "清扫地面";
             default -> "执行任务";
         };
     }
@@ -113,7 +173,6 @@ public final class Tasks {
         String t = s.trim().toLowerCase(Locale.ROOT);
         return switch (t) {
             case "tidy", "sort", "整理", "整理仓库" -> TIDY;
-            case "sweep", "clean", "pickup", "清扫", "清扫地面", "扫地", "捡东西" -> SWEEP;
             default -> null;
         };
     }
@@ -137,8 +196,6 @@ public final class Tasks {
         int dropped;
         /** 因为「目标就是来源本身／同一个大箱子」而跳过的步数（防丢物品，A1-e） */
         int skipped;
-        /** 清扫走到第几个网格点 */
-        int sweepIndex;
         boolean dirty;
         /** 批次 1 · P4 按来源箱分组：现在盯着的来源箱子 key，先把这箱的活干完再换（null = 重新扫） */
         String focus;
@@ -228,6 +285,11 @@ public final class Tasks {
     public static String start(MinecraftServer server, String botName, int kind, String region) {
         if (server == null || botName == null || botName.isEmpty()) {
             return "名册中没有该搬运工。";
+        }
+        if (kind != TIDY) {
+            // （优化4）清扫已下线：命令层旧的 porter sweep / bot sweep 节点还会传这个类型过来，
+            // 这里安全地拒绝，绝不建出一个没人会执行的任务（也不抛异常）。
+            return "清扫功能已移除：本模组不再自动拾取仓库范围内的掉落物。";
         }
         if (Porter.busyWithOrder(botName)) {
             return botName + " 正在配送订单，请等待配送完成后再派发任务。";
@@ -324,11 +386,12 @@ public final class Tasks {
             return;
         }
         try {
-            if (j.kind == TIDY) {
-                tidyTick(server, botName, j);
-            } else {
-                sweepTick(server, botName, j);
+            if (j.kind != TIDY) {
+                // 理论上到不了这里（start 已经拒绝非 TIDY）；防御性收尾，别让任务永远卡在 JOBS 里
+                finish(server, botName, j, "（该任务类型已下线）");
+                return;
             }
+            tidyTick(server, botName, j);
         } catch (Throwable t) {
             WarehouseMod.LOGGER.warn("[warehouse-keeper] 搬运工 {} 执行任务出错: {}", botName, t.toString());
             finish(server, botName, j, "（发生错误，任务已中止）");
@@ -397,7 +460,8 @@ public final class Tasks {
             return "整理完成：合并 " + j.merged + " 组，归位 " + j.moved + " 件。" + tagged + idle
                     + cost + skip + more + carried + tail;
         }
-        return "清扫完成：检查 " + j.steps + " 处，拾取 " + j.moved + " 件。" + cost + skip + more + carried + tail;
+        // （优化4）现在只剩 TIDY 一种任务；万一将来有别的类型，也给一句不含清扫字样的通用文案
+        return "任务完成。" + cost + skip + more + carried + tail;
     }
 
     /** 这个仓库里贴了标签的箱子数（报告用：区分「都已就位」和「没标签可指路」） */
@@ -753,15 +817,21 @@ public final class Tasks {
                             rec.dimension, rec.pos, ItemIds.of(b), true, false);
                 }
             }
-            // ② 箱内真正排序：按物品中文显示名的拼音（首字 → 次字 → …，见 byPinyin）把整箱排好。
+            // ② 箱内真正排序：按**创造模式物品栏的顺序**（优化2，见 CreativeOrder / sortKeysOf）把整箱排好，
+            //    不在创造栏里的物品排在后面、并保持原来的拼音序。
             //    每只箱子留一个空格子当「暂存位」，用选择排序的走法推着搬：
             //      - 当前格本来就该放这一格的东西 ⇒ 看下一格
-            //      - 当前格是空的 ⇒ 把「剩下那些里拼音最靠前的」整摞搬进来
+            //      - 当前格是空的 ⇒ 把「剩下那些里顺序最靠前的」整摞搬进来
             //      - 当前格被别的占着 ⇒ 先把它寄放到暂存位（下一轮再把该来的搬进来）
             //    搬运只往空格子写（doTidyMove 也会再确认一次），所以不会覆盖、不会丢东西；
             //    每搬一次「错位的摞数」都严格减少 ⇒ 一定会收敛，不会来回搬。
             //    容器满（一个空格都没有）时排不了 —— 交给 ③ 把它放错的东西搬走腾出空位，下一轮再排。
             if (!staging) {
+                // （优化2）按创造栏顺序排：先把这一箱用到的排序键取出来缓存（一遍 O(n) map 查 + 拼音排序），
+                // 后面选择排序只比 long，不会再出现 O(n²) 次 map 查 + 拼音比较。
+                // ensure 幂等，建表只在第一次真正跑到这里时发生一次，之后只是一次 boolean 判断。
+                CreativeOrder.ensure(server);
+                Map<String, Long> keys = sortKeysOf(items);
                 int park = -1;
                 for (int k = items.size() - 1; k >= 0; k--) {
                     if (items.get(k).isEmpty()) {
@@ -778,7 +848,7 @@ public final class Tasks {
                             continue;
                         }
                         String id = ItemIds.of(s);
-                        if (bestId == null || byPinyin(id, bestId) < 0) {
+                        if (bestId == null || compareKeys(keys, id, bestId) < 0) {
                             bestId = id;
                             best = k;
                         }
@@ -939,7 +1009,7 @@ public final class Tasks {
         String fromKey = from == null || from.pos == null ? null : WarehouseIndex.key(from.dimension, from.pos);
         if (fromKey != null) {
             ContainerTags.Tag own = ContainerTags.get(fromKey);
-            if (own != null && !own.staging && category.equals(own.effectiveCategory())) {
+            if (own != null && !own.staging && Categories.matches(own.effectiveCategory(), category)) {
                 return new Spot(from.dimension, from.pos);
             }
         }
@@ -959,7 +1029,7 @@ public final class Tasks {
                 if (!allowStaging) {
                     continue; // B14：暂存箱只出不进
                 }
-            } else if (!category.equals(tag.effectiveCategory())) {
+            } else if (!Categories.matches(tag.effectiveCategory(), category)) {
                 continue;
             }
             int prio = tag.staging ? 0 : (tag.isAutoMode() ? 1 : 2);
@@ -1058,7 +1128,7 @@ public final class Tasks {
     }
 
     /**
-     * 归仓（清扫后的 {@link #parkInWarehouse}）排序用：贴了本分类标签的箱子最优先，没标签的次之，
+     * 归仓（{@link #parkInWarehouse}）排序用：贴了本分类标签的箱子最优先，没标签的次之，
      * 暂存箱垫底（B14：只出不进，实在没地方才往里放）。
      */
     private static int tagRank(ContainerRecord rec, String category) {
@@ -1072,7 +1142,7 @@ public final class Tasks {
         if (tag.staging) {
             return 2;
         }
-        return category != null && category.equals(tag.effectiveCategory()) ? 0 : 1;
+        return category != null && Categories.matches(tag.effectiveCategory(), category) ? 0 : 1;
     }
 
     /** 把「家」的坐标归一化（双联箱的另一半也算同一个箱子），顺手纠正老档案里记的另一半坐标 */
@@ -1245,107 +1315,6 @@ public final class Tasks {
     }
 
     // ------------------------------------------------------------------
-    // 清扫地面
-
-    private static void sweepTick(MinecraftServer server, String botName, Job j) {
-        List<Region> regions = regionsOf(j.region);
-        if (regions.isEmpty()) {
-            finish(server, botName, j, "（没有可清扫的仓库区域）");
-            return;
-        }
-        // 把 sweepIndex 拆成「第几个区域 + 区域内第几个点」
-        int idx = j.sweepIndex;
-        Region region = null;
-        int local = 0;
-        for (Region r : regions) {
-            int n = gridCount(r);
-            if (idx < n) {
-                region = r;
-                local = idx;
-                break;
-            }
-            idx -= n;
-        }
-        if (region == null) {
-            // 走完了：把身上的东西送回去再收工
-            dumpCarried(server, botName, j);
-            finish(server, botName, j, "");
-            return;
-        }
-        ServerLevel level = Scanner.levelOf(server, Scanner.dimensionOf(region));
-        if (level == null) {
-            j.sweepIndex++;
-            return;
-        }
-        int[] p = gridPoint(region, local);
-        int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, p[0], p[1]);
-        Body.moveTo(server, botName, level, p[0] + 0.5, y, p[1] + 0.5);
-        if (j.phase == 0) {
-            j.phase = 1;
-            j.wait = 0;
-            return;
-        }
-        if (++j.wait < 4) {
-            return;
-        }
-        ServerPlayer bot = Body.get(server, botName);
-        if (bot != null) {
-            j.moved += vacuum(level, bot, p[0] + 0.5, y + 1.0, p[1] + 0.5, 5.0, 3.0);
-            if (carrySlots(server, botName) >= DUMP_AT) {
-                // 背包快满了就先送回仓库，别捡一半丢一半
-                dumpCarried(server, botName, j);
-            }
-        }
-        j.steps++;
-        j.sweepIndex++;
-        j.phase = 0;
-        j.wait = 0;
-        if (j.steps >= MAX_STEPS) {
-            dumpCarried(server, botName, j);
-            finish(server, botName, j, "（已达步数上限）");
-        }
-    }
-
-    private static int gridCount(Region r) {
-        int dx = Math.max(1, (r.max().getX() - r.min().getX()) / SWEEP_STEP + 1);
-        int dz = Math.max(1, (r.max().getZ() - r.min().getZ()) / SWEEP_STEP + 1);
-        return dx * dz;
-    }
-
-    private static int[] gridPoint(Region r, int index) {
-        int dx = Math.max(1, (r.max().getX() - r.min().getX()) / SWEEP_STEP + 1);
-        return new int[] {
-                r.min().getX() + (index % dx) * SWEEP_STEP,
-                r.min().getZ() + (index / dx) * SWEEP_STEP
-        };
-    }
-
-    /** 把脚边一片范围内的掉落物收进假人背包。@return 收了多少件 */
-    private static int vacuum(ServerLevel level, ServerPlayer bot, double x, double y, double z,
-                              double rx, double ry) {
-        int got = 0;
-        List<ItemEntity> near = level.getEntitiesOfClass(ItemEntity.class,
-                new AABB(x - rx, y - ry, z - rx, x + rx, y + ry, z + rx));
-        for (ItemEntity e : near) {
-            if (!e.isAlive()) {
-                continue;
-            }
-            ItemStack s = e.getItem();
-            if (s.isEmpty()) {
-                continue;
-            }
-            int before = s.getCount();
-            if (bot.getInventory().add(s)) {
-                got += before - s.getCount();
-                if (s.isEmpty()) {
-                    e.discard();
-                } else {
-                    e.setItem(s);
-                }
-            }
-        }
-        return got;
-    }
 
     /**
      * 把假人身上捡到的东西送回仓库。
@@ -1590,23 +1559,6 @@ public final class Tasks {
             }
         }
         return false;
-    }
-
-    /** 假人身上占了几格（不算举着的表演道具） */
-    public static int carrySlots(MinecraftServer server, String botName) {
-        ServerPlayer bot = Body.get(server, botName);
-        if (bot == null) {
-            return 0;
-        }
-        int held = Body.heldSlot(server, botName);
-        int n = 0;
-        var inv = bot.getInventory();
-        for (int i = 0; i < inv.getContainerSize(); i++) {
-            if (i != held && !inv.getItem(i).isEmpty()) {
-                n++;
-            }
-        }
-        return n;
     }
 
     /** 假人身上拿着的东西（给指令/网页看） */

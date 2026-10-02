@@ -8,6 +8,7 @@ import com.ds.warehouse.config.Region;
 import com.ds.warehouse.config.RegionStore;
 import com.ds.warehouse.index.AutoScan;
 import com.ds.warehouse.index.ContainerRecord;
+import com.ds.warehouse.index.Containers;
 import com.ds.warehouse.index.IndexStore;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.Scanner;
@@ -52,11 +53,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Stream;
 
 /**
  * /warehouse 指令树（里程碑 A：仓库索引）。
@@ -200,6 +201,8 @@ public final class WarehouseCommand {
                                 + "  耗时 " + idx.lastScanMillis + "ms");
                     }
                     showIndexInfo(ctx.getSource());
+                    // BUG7：有未分类物品就顺手说一句，并指到已有的清单命令（口径与那条命令完全一致）
+                    showUnclassifiedHint(ctx.getSource());
                     return 1;
                 }))
                 .then(Commands.literal("save").requires(WarehouseCommand::admin).executes(ctx -> {
@@ -359,12 +362,13 @@ public final class WarehouseCommand {
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> porterTask(ctx.getSource(), Tasks.TIDY,
                                                 StringArgumentType.getString(ctx, "region")))))
-                        .then(Commands.literal("sweep").requires(WarehouseCommand::admin)
-                                .executes(ctx -> porterTask(ctx.getSource(), Tasks.SWEEP, ""))
+                        // 优化4：清扫（自动拾取仓库范围内的掉落物）已整条移除，只留同名入口回一句明确提示。
+                        // 刻意**不带** requires(admin)：带上之后非管理员只会看到「权限不足」，那正是要避免的误解。
+                        .then(Commands.literal("sweep")
+                                .executes(ctx -> sweepRemoved(ctx.getSource()))
                                 .then(Commands.argument("region", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
-                                        .executes(ctx -> porterTask(ctx.getSource(), Tasks.SWEEP,
-                                                StringArgumentType.getString(ctx, "region")))))
+                                        .executes(ctx -> sweepRemoved(ctx.getSource()))))
                         .then(Commands.literal("preview").requires(WarehouseCommand::admin)
                                 .executes(ctx -> porterPreview(ctx.getSource(), ""))
                                 .then(Commands.argument("region", NameArgument.name())
@@ -419,7 +423,14 @@ public final class WarehouseCommand {
                         .then(Commands.literal("tidy")
                                 .then(taskNode(Tasks.TIDY)))
                         .then(Commands.literal("sweep")
-                                .then(taskNode(Tasks.SWEEP)))
+                                // 优化4：bot sweep 与 porter sweep 同命运 —— 入口在，语义没了
+                                .executes(ctx -> sweepRemoved(ctx.getSource()))
+                                .then(Commands.argument("name", NameArgument.name())
+                                        .suggests(BOT_SUGGEST)
+                                        .executes(ctx -> sweepRemoved(ctx.getSource())))
+                                .then(Commands.argument("region", NameArgument.name())
+                                        .suggests(REGION_SUGGEST)
+                                        .executes(ctx -> sweepRemoved(ctx.getSource()))))
                         .then(Commands.literal("stop")
                                 .then(Commands.argument("name", NameArgument.name())
                                         .suggests(BOT_SUGGEST)
@@ -478,9 +489,10 @@ public final class WarehouseCommand {
     }
 
     /**
-     * {@code /warehouse bot tidy <名字> [仓库]} 与 {@code ... sweep ...} 的参数节点。
+     * {@code /warehouse bot tidy <名字> [仓库]} 的参数节点：「名字 → 可选仓库」，
+     * 不写仓库就用这个假人分配到的仓库。
      *
-     * <p>都是「名字 → 可选仓库」：不写仓库就用这个假人分配到的仓库。
+     * <p>{@code sweep} 在优化4 里已连同任务本体一起删除，不再复用这条节点（见 {@link #sweepRemoved}）。
      */
     private static RequiredArgumentBuilder<CommandSourceStack, String> taskNode(int kind) {
         return Commands.argument("name", NameArgument.name())
@@ -490,6 +502,18 @@ public final class WarehouseCommand {
                         .suggests(REGION_SUGGEST)
                         .executes(ctx -> botTask(ctx.getSource(), StringArgumentType.getString(ctx, "name"),
                                 kind, StringArgumentType.getString(ctx, "region"))));
+    }
+
+    /**
+     * 优化4：{@code porter sweep} / {@code bot sweep} 的存根。
+     *
+     * <p>「清扫地面」＝假人自动拾取仓库范围内的掉落物，已随任务本体（{@code Tasks.SWEEP}）一起删除，
+     * 命令层只剩这个同名入口。这里发一条 {@code sendFailure}（红字）并返回 {@code 0}，
+     * 把「功能没了」说清楚 —— 而不是让玩家对着一条静默成功的命令猜自己是不是没权限。
+     */
+    private static int sweepRemoved(CommandSourceStack src) {
+        src.sendFailure(Component.literal("清扫／自动拾取功能已在 0.21.0 移除：仓库范围内的掉落物不会再被自动捡起。"));
+        return 0;
     }
 
     // ------------------------------------------------------------------
@@ -1542,7 +1566,7 @@ public final class WarehouseCommand {
         for (int i = from; i < to; i++) {
             WarehouseIndex.ItemEntry e = all.get(i);
             send(src, "  " + (i + 1) + ". " + e.displayName + "  x" + e.total
-                    + "  [" + e.stacksText() + "]  " + Categories.of(e.itemId)
+                    + "  [" + e.stacksText() + "]  " + catName(Categories.of(e.itemId))
                     + "  (" + e.refs.size() + " 处)  " + e.itemId);
         }
         if (p < pages) {
@@ -1611,7 +1635,8 @@ public final class WarehouseCommand {
         }
         Map<String, long[]> byCat = new LinkedHashMap<>();
         Map<String, Integer> kinds = new LinkedHashMap<>();
-        for (String c : Categories.ORDER) {
+        // 统计顺序 = Categories.order()（创造栏页签顺序 + 「其他」），不再是写死的 10 个类目
+        for (String c : Categories.order()) {
             byCat.put(c, new long[]{0, 0});
             kinds.put(c, 0);
         }
@@ -1630,7 +1655,7 @@ public final class WarehouseCommand {
             if (v[0] == 0) {
                 continue;
             }
-            send(src, "  " + en.getKey() + ": " + kinds.getOrDefault(en.getKey(), 0) + " 种 / "
+            send(src, "  " + catName(en.getKey()) + ": " + kinds.getOrDefault(en.getKey(), 0) + " 种 / "
                     + v[0] + " 个 / " + v[1] + " 槽位");
         }
     }
@@ -1658,29 +1683,31 @@ public final class WarehouseCommand {
         }
         Map<String, long[]> byCat = new LinkedHashMap<>();
         Map<String, Integer> kinds = new LinkedHashMap<>();
-        for (String c : Categories.ORDER) {
+        for (String c : Categories.order()) {
             byCat.put(c, new long[]{0, 0});
             kinds.put(c, 0);
         }
         Map<String, Integer> layers = new LinkedHashMap<>();
         int unclassified = 0;
         for (WarehouseIndex.ItemEntry e : idx.items.values()) {
-            Categories.Decision d = Categories.decide(e.itemId);
-            long[] arr = byCat.computeIfAbsent(d.category(), k -> new long[]{0, 0});
+            // 统计口径 = Categories.of（与 /warehouse status、网页面板、tag 同一套，未分类数才对得上）；
+            // decide() 只负责「这一条是靠哪一层判出来的」这半张诊断信息
+            String c = Categories.of(e.itemId);
+            long[] arr = byCat.computeIfAbsent(c, k -> new long[]{0, 0});
             arr[0] += e.total;
             arr[1] += e.refs.size();
-            kinds.merge(d.category(), 1, Integer::sum);
-            layers.merge(d.layer(), 1, Integer::sum);
-            if (OTHER.equals(d.category())) {
+            kinds.merge(c, 1, Integer::sum);
+            if (OTHER.equals(c)) {
                 unclassified++;
             }
+            layers.merge(Categories.decide(e.itemId).layer(), 1, Integer::sum);
         }
         for (Map.Entry<String, long[]> en : byCat.entrySet()) {
             long[] v = en.getValue();
             if (v[0] == 0) {
                 continue;
             }
-            send(src, "  " + en.getKey() + ": " + kinds.getOrDefault(en.getKey(), 0) + " 种 / "
+            send(src, "  " + catName(en.getKey()) + ": " + kinds.getOrDefault(en.getKey(), 0) + " 种 / "
                     + v[0] + " 个 / " + v[1] + " 槽位");
         }
         send(src, "判定层：");
@@ -1723,18 +1750,39 @@ public final class WarehouseCommand {
     }
 
     /**
+     * BUG7：索引里有未分类物品时顺手说一句，并指向已有的清单命令。
+     *
+     * <p>口径**完全沿用** {@link #showUnclassified}：{@code OTHER.equals(Categories.of(itemId))}，
+     * 不另造统计口径，两处数字永远对得上。
+     */
+    private static void showUnclassifiedHint(CommandSourceStack src) {
+        int n = 0;
+        for (WarehouseIndex.ItemEntry e : WarehouseMod.INDEX.items.values()) {
+            if (OTHER.equals(Categories.of(e.itemId))) {
+                n++;
+            }
+        }
+        if (n > 0) {
+            send(src, "未分类 " + n + " 种，可用 /warehouse categories unclassified 查看");
+        }
+    }
+
+    /**
      * 单个物品的判定明细。整条只输出一行，格式固定，方便 RCON 审计脚本用正则解析：
      * {@code <id> → <分类> [<层> <证据>] reg=0|1}（reg=1 表示这个 id 在当前物品注册表里）
      */
     private static void showOneCategory(CommandSourceStack src, String input) {
         String resolved = ItemIds.resolve(input);
         boolean registered = resolved != null;
-        Categories.Decision d = Categories.decide(registered ? resolved : input);
-        send(src, d.key() + " → " + d.category() + " [" + d.layer() + " " + d.detail() + "] reg="
+        String id = registered ? resolved : input;
+        Categories.Decision d = Categories.decide(id);
+        // 展示用「这个 id 实际归到哪个类目」= Categories.of（与 list / 面板 / tag 一致）的中文名；
+        // [层 证据] 保留旧判定链的诊断信息，方便查它为什么落在这里
+        send(src, d.key() + " → " + catName(Categories.of(id)) + " [" + d.layer() + " " + d.detail() + "] reg="
                 + (registered ? 1 : 0));
     }
 
-    /** 全量导出（分页）：id|分类|判定层 —— 给审计脚本比对黄金表用 */
+    /** 全量导出（分页）：id|创造栏页签键|判定层 —— 给审计脚本比对黄金表用 */
     private static void dumpCategories(CommandSourceStack src, int page) {
         List<WarehouseIndex.ItemEntry> list = new ArrayList<>(WarehouseMod.INDEX.items.values());
         if (list.isEmpty()) {
@@ -1751,12 +1799,11 @@ public final class WarehouseCommand {
         int from = (page - 1) * PAGE_SIZE;
         for (int i = from; i < Math.min(from + PAGE_SIZE, list.size()); i++) {
             String id = list.get(i).itemId;
-            Categories.Decision d = Categories.decide(id);
-            send(src, id + "|" + d.category() + "|" + d.layer());
+            send(src, id + "|" + Categories.of(id) + "|" + Categories.decide(id).layer());
         }
     }
 
-    /** 全部已注册物品的分类导出（分页）：id|分类|判定层 —— 全量审计用（不受索引影响） */
+    /** 全部已注册物品的分类导出（分页）：id|创造栏页签键|判定层 —— 全量审计用（不受索引影响） */
     private static void dumpAllCategories(CommandSourceStack src, int page) {
         List<String> ids = new ArrayList<>();
         for (Identifier id : net.minecraft.core.registries.BuiltInRegistries.ITEM.keySet()) {
@@ -1777,8 +1824,7 @@ public final class WarehouseCommand {
         int from = (page - 1) * size;
         for (int i = from; i < Math.min(from + size, ids.size()); i++) {
             String id = ids.get(i);
-            Categories.Decision d = Categories.decide(id);
-            send(src, id + "|" + d.category() + "|" + d.layer());
+            send(src, id + "|" + Categories.of(id) + "|" + Categories.decide(id).layer());
         }
     }
 
@@ -1798,18 +1844,58 @@ public final class WarehouseCommand {
             Map.entry("redstone", CategoryRules.REDSTONE), Map.entry("magic", CategoryRules.MAGIC),
             Map.entry("container", CategoryRules.CONTAINER), Map.entry("other", CategoryRules.OTHER));
 
-    /** 10 个分类名的补全（中英文都列） */
+    /** 分类名补全：创造栏页签键（新，如 building_blocks）+ 旧中文父类名 + ASCII 别名 */
     private static final com.mojang.brigadier.suggestion.SuggestionProvider<CommandSourceStack> CATEGORY_SUGGEST =
-            (ctx, builder) -> SharedSuggestionProvider.suggest(
-                    Stream.concat(Categories.ORDER.stream(), CATEGORY_ALIAS.keySet().stream()).toList(), builder);
+            (ctx, builder) -> SharedSuggestionProvider.suggest(categoryChoices(), builder);
 
-    /** 把玩家输入（中文名 / ASCII 别名）翻成正式分类名，认不出返回 null */
+    /** 补全候选：{@code Categories.order()} 打头，再补旧类目名与 ASCII 别名，去重保序 */
+    private static List<String> categoryChoices() {
+        LinkedHashSet<String> out = new LinkedHashSet<>(Categories.order());
+        out.addAll(CategoryRules.LEGACY);
+        out.addAll(CATEGORY_ALIAS.keySet());
+        return List.copyOf(out);
+    }
+
+    /**
+     * 给玩家看的「可选分类」文本。
+     *
+     * <p>只列**能直接打出来**的名字：旧中文父类名（建材方块…其他）与 ASCII 别名。
+     * 新类目是创造栏页签键（{@code minecraft:building_blocks} / {@code building_blocks}），
+     * 但它们的**中文显示名 {@code Categories.resolve} 并不接受**，混在一起列会让玩家照着打出认不出的名字。
+     */
+    private static String categoryListText() {
+        LinkedHashSet<String> out = new LinkedHashSet<>(CategoryRules.LEGACY);
+        out.addAll(CATEGORY_ALIAS.keySet());
+        return String.join(" / ", out);
+    }
+
+    /** 类目键 → 给人看的中文名；认不出就把键原样还回去（{@code Categories.displayName} 不会返回 null） */
+    private static String catName(String key) {
+        if (key == null || key.isEmpty()) {
+            return "其他";
+        }
+        return Categories.displayName(key);
+    }
+
+    /**
+     * 把玩家输入（创造栏页签键 / 旧中文类目名 / ASCII 别名）翻成正式类目键，认不出返回 null。
+     *
+     * <p>顺序要紧：先过 {@link #CATEGORY_ALIAS}，因为 {@code Categories.resolve("other")} 是**不认**的
+     * —— {@code "other"} 既不是页签键也不是旧中文名，只有别名表能把它翻成
+     * {@code CategoryRules.OTHER}（{@code warehouse-keeper:other}）。
+     */
     private static String resolveCategory(String raw) {
         if (raw == null) {
             return null;
         }
-        String byAlias = CATEGORY_ALIAS.get(raw.toLowerCase(Locale.ROOT));
-        return ContainerTags.normalizeCategory(byAlias != null ? byAlias : raw);
+        String byAlias = CATEGORY_ALIAS.get(raw.trim().toLowerCase(Locale.ROOT));
+        String target = byAlias != null ? byAlias : raw;
+        String resolved = Categories.resolve(target);
+        if (resolved != null) {
+            return resolved;
+        }
+        // 兜底：ContainerTags 自己的归一化（旧中文名，大小写不敏感）
+        return ContainerTags.normalizeCategory(target);
     }
 
     /** 谁能下单取货 / 入库：OP，或在权限表里 take 权限为开的玩家 */
@@ -1856,7 +1942,8 @@ public final class WarehouseCommand {
                                         IntegerArgumentType.getInteger(ctx, "page")))))
                 .then(Commands.literal("set").requires(WarehouseCommand::canTag)
                         .executes(ctx -> {
-                            send(ctx.getSource(), "用法：/warehouse tag set <分类> [x y z]，可选分类：" + ContainerTags.categoryListText());
+                            send(ctx.getSource(), "用法：/warehouse tag set <分类> [x y z]，可选分类：" + categoryListText()
+                                    + "；也可直接给创造栏页签键（building_blocks / ingredients 之类）");
                             return 0;
                         })
                         .then(Commands.argument("category", StringArgumentType.string())
@@ -1937,8 +2024,19 @@ public final class WarehouseCommand {
             pos = hit.getBlockPos();
         }
         BlockPos canon = Scanner.canonical(level, pos);
-        if (!(level.getBlockEntity(canon) instanceof Container)) {
+        BlockEntity be = level.getBlockEntity(canon);
+        if (!(be instanceof Container)) {
             send(src, "坐标 " + fmt(canon) + " 上不是容器（箱子/木桶/潜影盒…）。");
+            return null;
+        }
+        // 是容器、但被排除表挡掉（雕纹书架/架子…）：它不参与仓库管理，
+        // 说清楚是被配置排除的，而不是含糊一句「不是容器」让玩家去猜。
+        if (!Containers.isWarehouseContainer(level, canon, be)) {
+            String blockId = BuiltInRegistries.BLOCK.getKey(level.getBlockState(canon).getBlock()).toString();
+            send(src, "该方块不参与仓库管理：" + blockId
+                    + (Containers.excluded(blockId)
+                            ? " 已在配置 containerExclude（容器排除表）中排除。"
+                            : " 不算仓库容器。"));
             return null;
         }
         if (level.getBlockState(canon).getBlock() == Blocks.ENDER_CHEST) {
@@ -2021,8 +2119,9 @@ public final class WarehouseCommand {
         }
         String cat = resolveCategory(rawCategory);
         if (cat == null) {
-            send(src, "分类「" + rawCategory + "」不认识。可选：" + ContainerTags.categoryListText()
-                    + "（也可用别名 mineral/build/wood/tool/food/farm/redstone/magic/container/other）");
+            send(src, "分类「" + rawCategory + "」不认识。可选：" + categoryListText()
+                    + "（也可用别名 mineral/build/wood/tool/food/farm/redstone/magic/container/other，"
+                    + "或创造栏页签键 building_blocks / ingredients 之类）");
             return 0;
         }
         ContainerTags.Tag tag = ContainerTags.get(t.key());

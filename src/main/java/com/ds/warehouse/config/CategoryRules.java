@@ -37,17 +37,45 @@ public final class CategoryRules {
     public static final String REDSTONE = "红石机械";
     public static final String MAGIC = "酿造附魔";
     public static final String CONTAINER = "容器杂项";
-    public static final String OTHER = "其他";
 
-    /** 显示顺序（也是同档平手时的优先级） */
+    /**
+     * 合成类目键：<b>不属于任何创造页签</b>的物品统一落这里。
+     *
+     * <p>0.21.0 起物品类目不再用中文常量，而是「物品所在创造页签的注册键」
+     * （见 {@link com.ds.warehouse.util.Categories#of}）；带命名空间是为了它和
+     * {@code minecraft:building_blocks}、{@code modid:xxx} 这些真页签键长得一样，
+     * 存进 {@code container-tags.json} 与 {@code categories.json} 时不会跟旧中文名混淆。
+     */
+    public static final String OTHER = "warehouse-keeper:other";
+
+    /**
+     * 十个旧中文类目名 —— <b>现在它们是「父类」</b>，不再是判定结果。
+     *
+     * <p>旧存档的 {@code container-tags.json} 里写着这些名字，用户拍板不迁移、不改写：
+     * 贴了旧名的箱子仍然收 {@link com.ds.warehouse.util.Categories#children} 算出来的新键物品。
+     * 常量本身保留字面量，任何写盘/读盘路径都还能拿到它们。
+     */
+    public static final List<String> LEGACY = List.of(
+            MINERAL, BUILD, WOOD, TOOL, FOOD, FARM, REDSTONE, MAGIC, CONTAINER, "其他");
+
+    /**
+     * 旧中文类目的显示顺序（也是同档平手时的优先级）。
+     *
+     * <p><b>遗留结构</b>：0.21.0 的类目键已经是创造页签键，展示顺序看
+     * {@link com.ds.warehouse.util.Categories#order()}。这个 List 留着是因为三条链仍按它排序：
+     * ① 判定表自检/离线回归（{@code tools/categories/check.ps1}）；② 覆盖表模板文案；
+     * ③ 客户端标签环 {@code client/ContainerTagBar}。刻意不把它换成页签键 —— 本类必须保持零 Minecraft 依赖。
+     */
     public static final List<String> ORDER = List.of(
-            MINERAL, BUILD, WOOD, TOOL, FOOD, FARM, REDSTONE, MAGIC, CONTAINER, OTHER);
+            MINERAL, BUILD, WOOD, TOOL, FOOD, FARM, REDSTONE, MAGIC, CONTAINER, "其他");
 
     /**
      * 规则表版本。**改动下面任何一张表就要 +1** —— 索引文件里存着上次算好的分类表，
      * 版本对不上就丢弃重算，免得规则改过之后还拿旧结果当答案。
+     *
+     * <p>5：类目键从自研中文常量换成创造页签注册键（0.21.0）。
      */
-    public static final int VERSION = 4;
+    public static final int VERSION = 5;
 
     /** 强形制：这个词一出现，几乎就定了 */
     private static final int STRONG = 0;
@@ -293,6 +321,19 @@ public final class CategoryRules {
     public static String suffixOf(String path) {
         String k = suffixHit(path);
         return k == null ? null : ORDER.get(SUFFIX.get(k));
+    }
+
+    /**
+     * 这个名字是不是「旧中文类目名/父类名」。
+     *
+     * <p>只用来把「旧名」与「新页签键」分开：旧名走父类语义（{@code ContainerTags} 原样落盘），
+     * 新键直接就是类目。判定是大小写敏感的 —— 这十个名字都是中文，没有大小写问题。
+     *
+     * @param name 待判定字符串
+     * @return true 表示它是 {@link #LEGACY} 里的那十个之一
+     */
+    public static boolean isLegacy(String name) {
+        return name != null && LEGACY.contains(name);
     }
 
     /**

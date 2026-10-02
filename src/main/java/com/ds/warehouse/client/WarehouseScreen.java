@@ -146,12 +146,12 @@ public class WarehouseScreen extends Screen {
     private R pickBox;
     private R orderRow;
     /**
-     * 面板里的下拉框（取货页的仓库选择 / 搬运工页「整理清扫」的仓库选择）。
+     * 面板里的下拉框（取货页的仓库选择 / 搬运工页「整理」的仓库选择）。
      * 两处共用同一套实现：一个按钮 + 一份展开的、可滚动的候选清单（弹出层，画在最上面）。
      */
     private Dropdown pickDd;
     private Dropdown taskDd;
-    /** 「搬运工」页「整理清扫」子页里那行仓库选择器（按钮铺满整行） */
+    /** 「搬运工」页「整理」子页里那行仓库选择器（按钮铺满整行） */
     private R taskRow;
     /**
      * 输入框的占位提示：原版 EditBox 的 hint 是左对齐的，跟「文字默认在自己框里居中」不一致，
@@ -736,11 +736,11 @@ public class WarehouseScreen extends Screen {
     /** 第 2 页「搬运工」：按二级页签分工（标题画在页面上方的小标题带里） */
     private void layoutPorter() {
         Flow f = new Flow(content);
-        // 底部那排按钮两个子页都有（名册：新增/全部停下；整理清扫：整理/清扫）
+        // 底部那排按钮两个子页都有（名册：新增/全部停下；整理：整理仓库一个按钮）
         footRow = f.takeBottom(f.left() >= ROW_H + GAP ? ROW_H : ROW_H_MIN, GAP);
 
-        // 子页「整理清扫」：第一行选要整理的仓库，剩下的高度全部给说明文字
-        if ("整理清扫".equals(subName())) {
+        // 子页「整理」：第一行选要整理的仓库，剩下的高度全部给说明文字
+        if ("整理".equals(subName())) {
             taskRow = f.takeBottom(ROW_H, GAP);
             notesBox = f.takeBottom(Math.max(2 * LINE_H, Math.min(6 * LINE_H, f.left() / 2)), GAP);
             return;
@@ -1490,7 +1490,7 @@ public class WarehouseScreen extends Screen {
         if (!admin) {
             return;
         }
-        if ("整理清扫".equals(subName())) {
+        if ("整理".equals(subName())) {
             initPorterTasks();
         } else {
             initPorterRoster();
@@ -1563,13 +1563,15 @@ public class WarehouseScreen extends Screen {
     }
 
     /**
-     * 子页「整理清扫」：两个动作按钮（说明文字画在 {@code notesBox} 里）。
+     * 子页「整理」：唯一的动作按钮（说明文字画在 {@code notesBox} 里）。
      *
-     * <p>两个动作都会先弹一次确认框（会动到箱子里的东西），确认后才发指令。
+     * <p>动作会先弹一次确认框（会动到箱子里的东西），确认后才发指令。
+     * 「清扫地面」已删除（用户拍板：彻底移除自动拾取 / 清扫），所以这排只剩「整理仓库」一个按钮，
+     * 它铺满整行 —— 再看格子数去摆位会留出半行空白。
      */
     private void initPorterTasks() {
         if (taskRow != null && !taskRow.empty()) {
-            // 整理 / 清扫作用于哪个仓库：一行下拉按钮（第 0 项「全部仓库」= 各搬运工各管自己的值守仓库）
+            // 整理作用于哪个仓库：一行下拉按钮（第 0 项「全部仓库」= 各搬运工各管自己的值守仓库）
             taskDd.btnRect = new R(taskRow.x(), taskRow.y(), taskRow.w(), taskRow.h());
             if (!taskDd.touched) {
                 taskDd.choice = sel + 1;   // 没手动选过：跟着「仓库」页的选中项走
@@ -1580,15 +1582,11 @@ public class WarehouseScreen extends Screen {
         if (footRow == null || footRow.empty()) {
             return;
         }
-        btn("整理仓库", gridLeft(footRow), b ->
+        btn("整理仓库", footRow, b ->
                 withTaskRegion(region -> ask("整理仓库" + (region.isEmpty() ? " · 全部仓库" : " · " + region),
                         "搬运工将开始把箱内物品压实、按顺序排好，并把放错箱子的物品搬回其所属箱子。"
                                 + "整理过程中请勿再向箱子放入物品。确定现在开始吗？",
                         () -> runTask("warehouse porter tidy", region, "整理仓库"))));
-        btn("清扫地面", gridRight(footRow), b ->
-                withTaskRegion(region -> ask("清扫地面" + (region.isEmpty() ? " · 全部仓库" : " · " + region),
-                        "搬运工将拾取仓库范围内落地面的物品并放回箱子。确定现在开始吗？",
-                        () -> runTask("warehouse porter sweep", region, "清扫地面"))));
     }
 
     /** 第 3 页「权限」的控件：一个账号一行三个开关；「审计」子页（sub=1）没有开关 */
@@ -1619,8 +1617,8 @@ public class WarehouseScreen extends Screen {
      * 页内下拉框：一个按钮 + 一份展开的候选清单（弹出层，画在最上面）。
      *
      * <p>第 0 项固定是「全部仓库」（不指定仓库）：取货页表示「所有仓库的物品一起看」，
-     * 搬运工页「整理清扫」表示「每名搬运工各管自己的值守仓库」。其余项按 {@link RegionCache} 的顺序。
-     * 取货页与整理清扫页共用这一份实现，省得两处各写一遍「展开 / 收起 / 滚动 / 点选」。
+     * 搬运工页「整理」表示「每名搬运工各管自己的值守仓库」。其余项按 {@link RegionCache} 的顺序。
+     * 取货页与整理页共用这一份实现，省得两处各写一遍「展开 / 收起 / 滚动 / 点选」。
      */
     private final class Dropdown {
         /** 按钮矩形（由各页 layout 阶段填进来） */
@@ -1844,7 +1842,7 @@ public class WarehouseScreen extends Screen {
         return region.isEmpty() ? "未选仓库" : region;
     }
 
-    /** 「整理清扫」页当前选的仓库：空串 = 全部（每名搬运工各扫自己的值守仓库） */
+    /** 「整理」页当前选的仓库：空串 = 全部（每名搬运工各扫自己的值守仓库） */
     private String taskRegion() {
         if (taskDd == null || taskDd.choice <= 0) {
             return "";
@@ -1852,14 +1850,14 @@ public class WarehouseScreen extends Screen {
         return clean(taskDd.entryName(taskDd.choice));
     }
 
-    /** 「整理清扫」页发指令用：选「全部仓库」就不带仓库名（服务端按各假人自己的值守仓库办） */
+    /** 「整理」页发指令用：选「全部仓库」就不带仓库名（服务端按各假人自己的值守仓库办） */
     private void withTaskRegion(NameUser user) {
         String region = taskRegion();
         user.use(region.isEmpty() || RegionCache.list().isEmpty() ? "" : region);
     }
 
     /**
-     * 「整理清扫」页真正发指令：选了具体仓库就发一条；选「全部仓库」就**逐间派单**。
+     * 「整理」页真正发指令：选了具体仓库就发一条；选「全部仓库」就**逐间派单**。
      *
      * <p>为什么不能只发一条不带仓库名的命令：服务端 {@code Tasks.start} 会把空仓库名换成
      * 「被挑中那名空闲假人自己的值守仓库」（名册里第一个满足条件的），于是其它仓库根本没人碰
@@ -1926,14 +1924,14 @@ public class WarehouseScreen extends Screen {
      * 二级页签的名字。
      *
      * <p>「仓库」页管理员 6 个（概览 / 新建 / 扩建 / 物品 / 箱子 / 维护），普通玩家只给 3 个（概览 / 物品 / 箱子）；
-     * 「搬运工」页 2 个（名册值守 / 整理清扫）；「权限」页 2 个（权限 / 审计）；「取货」没有子页。
+     * 「搬运工」页 2 个（名册值守 / 整理）；「权限」页 2 个（权限 / 审计）；「取货」没有子页。
      */
     private String[] subNames() {
         return switch (tab) {
             case 0 -> admin
                     ? new String[]{"概览", "新建", "扩建", "物品", "箱子", "维护"}
                     : new String[]{"概览", "物品", "箱子"};
-            case 2 -> admin ? new String[]{"名册值守", "整理清扫"} : new String[0];
+            case 2 -> admin ? new String[]{"名册值守", "整理"} : new String[0];
             case 3 -> admin ? new String[]{"权限", "审计"} : new String[0];
             default -> new String[0];
         };
@@ -2020,11 +2018,11 @@ public class WarehouseScreen extends Screen {
                 int n = ClientSnapshot.bots().size();
                 int vis = Math.max(0, rowsVisible(rowsBox, rowH));
                 String more = n > vis && vis > 0 ? "（只显示前 " + vis + " 个）" : "";
-                if ("整理清扫".equals(subName())) {
+                if ("整理".equals(subName())) {
                     yield pickFit(w,
-                            "整理清扫 · 「整理」把箱子压实并把放错的搬回指定箱子；「清扫」把地上的东西捡回箱子",
-                            "整理清扫 · 整理箱子 / 捡回地上的东西",
-                            "整理清扫");
+                            "整理 · 把箱子压实、并把放错箱子的物品搬回它所属的箱子",
+                            "整理 · 整理箱子里的物品",
+                            "整理");
                 }
                 yield pickFit(w,
                         "搬运工 · 共 " + n + " 个（点一行选中搬运工，再选择目标仓库并点击「确定」）" + more,
@@ -2340,7 +2338,7 @@ public class WarehouseScreen extends Screen {
     /**
      * 弹出危险操作的确认框。
      *
-     * <p>「危险」指的是点错了会丢东西或改动仓库定义的那些：删除仓库、并进新圈范围、整理仓库、清扫地面。
+     * <p>「危险」指的是点错了会丢东西或改动仓库定义的那些：删除仓库、并进新圈范围、整理仓库。
      * 弹窗期间整个面板被挡住：鼠标点击一律被吃掉（只认「确定 / 取消」），键盘按键也一概不透传，
      * 免得手快连点两次把底下真正的按钮也按了。
      */
@@ -2798,7 +2796,6 @@ public class WarehouseScreen extends Screen {
         if (this.font.width(label) > room) {
             String brief = switch (label) {
                 case "名册值守" -> "名册";
-                case "整理清扫" -> "清扫";
                 default -> label;
             };
             label = this.font.width(brief) <= room ? brief : fit(brief, room);
@@ -3997,8 +3994,8 @@ public class WarehouseScreen extends Screen {
             textIn(g, captionLeft, "仅管理员（OP）可指挥搬运工。", 0xFFE0B36A);
             return;
         }
-        // 子页「整理清扫」：不画名册，只把「整理」和「清扫」的区别说清楚（动作按钮在下面那排）
-        if ("整理清扫".equals(subName())) {
+        // 子页「整理」：不画名册，只把「整理」做什么说清楚（动作按钮在下面那排）
+        if ("整理".equals(subName())) {
             if (notesBox != null && !notesBox.empty()) {
                 String region = taskRegion();
                 // 说明文字按框宽折行：宁可少说一句，也不要被截成半句 + 「…」
@@ -4006,8 +4003,7 @@ public class WarehouseScreen extends Screen {
                 int bottom = notesBox.bottom();
                 for (String line : List.of(
                         "整理：把箱内物品压实、按顺序排好，并把放错箱子的物品搬回它所属的箱子。",
-                        "清扫：把仓库范围内掉在地上的物品捡起来放回箱子。",
-                        "两个动作开始前都会再弹一次确认框；进行中请勿再往箱子里放东西。"
+                        "开始前会再弹一次确认框；进行中请勿再往箱子里放东西。"
                                 + (region.isEmpty() ? "当前范围：全部仓库（每名搬运工各管自己的值守仓库）。"
                                         : "当前仓库：" + region))) {
                     int color = y == notesBox.y() ? 0xFF8FA0B8 : 0xFF6E7E93;
@@ -4414,7 +4410,7 @@ public class WarehouseScreen extends Screen {
             return true;
         }
         if (ev.button() == 0 && taskDd != null && taskDd.open && taskDd.click(ev.x(), ev.y())) {
-            // 「整理清扫」页的仓库下拉同理
+            // 「整理」页的仓库下拉同理
             return true;
         }
         if (ev.button() == 0 && catDd != null && catDd.open) {

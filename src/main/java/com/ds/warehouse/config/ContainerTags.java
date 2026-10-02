@@ -2,6 +2,7 @@ package com.ds.warehouse.config;
 
 import com.ds.warehouse.WarehouseMod;
 import com.ds.warehouse.index.ContainerRecord;
+import com.ds.warehouse.index.Containers;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.Scanner;
 import com.ds.warehouse.index.WarehouseIndex;
@@ -13,7 +14,6 @@ import com.google.gson.reflect.TypeToken;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.Container;
 import net.minecraft.world.level.block.entity.BlockEntity;
 
 import java.io.IOException;
@@ -259,7 +259,8 @@ public final class ContainerTags {
             return false;
         }
         BlockEntity be = level.getBlockEntity(s.pos());
-        return be instanceof Container;
+        // 判据统一走 Containers：雕纹书架/架子这类被排除的方块在这里也必须算「不在」
+        return Containers.isWarehouseContainer(level, s.pos(), be);
     }
 
     // ------------------------------------------------------------------
@@ -479,7 +480,7 @@ public final class ContainerTags {
             if (level == null || !level.isLoaded(s.pos())) {
                 continue; // 区块没加载：无从判断，留着
             }
-            if (!(level.getBlockEntity(s.pos()) instanceof Container)) {
+            if (!Containers.isWarehouseContainer(level, s.pos(), level.getBlockEntity(s.pos()))) {
                 MAP.remove(e.getKey());
                 dirty = true;
                 dead++;
@@ -508,9 +509,13 @@ public final class ContainerTags {
     // 「按内容自动」：件数加权取最大项
 
     /**
-     * 箱内件数最多的分类（同票时按 {@link Categories#ORDER} 的顺序定序，保证可复现）。
+     * 箱内件数最多的类目（同票时按 {@link Categories#order()} 的位置定序，保证可复现）。
      *
-     * @return 分类名；箱内没有可判定物品时返回 null
+     * <p>0.21.0 起统计的是<b>新类目键</b>（创造页签键，见 {@link Categories#of}），
+     * 落盘进 {@code autoCategory} 的自然也是新键。手动档里可能还留着旧中文名（父类），
+     * 那是玩家数据，本方法不负责改写。
+     *
+     * @return 类目键；箱内没有可判定物品时返回 null
      */
     public static String dominantCategory(ContainerRecord rec) {
         if (rec == null || rec.contents.isEmpty()) {
@@ -533,14 +538,14 @@ public final class ContainerTags {
         }
         String best = null;
         int bestCount = -1;
-        for (String cat : Categories.ORDER) {
+        for (String cat : Categories.order()) {
             Integer c = weight.get(cat);
             if (c != null && c > bestCount) {
                 best = cat;
                 bestCount = c;
             }
         }
-        // 理论上不会走到这里（分类一定落在 ORDER 里），保底再扫一遍
+        // 保底：覆盖表可能把物品钉到某个不在 order() 里的历史类目上，那样它就不在上面那一轮里
         if (best == null) {
             for (Map.Entry<String, Integer> e : weight.entrySet()) {
                 if (e.getValue() > bestCount) {
@@ -552,31 +557,28 @@ public final class ContainerTags {
         return best;
     }
 
-    /** 分类名是否合法（手动选择用） */
+    /**
+     * 把用户输入规范化成「箱子标签分类」（手动选择用）。
+     *
+     * <p>两类都收：新页签键（{@code minecraft:ingredients} / 省略命名空间的 {@code ingredients}）
+     * 与旧中文名（「建材方块」…）。旧名<b>原样返回</b> —— 它是父类，贴了它的箱子按
+     * {@link Categories#matches} 继续收该旧类目原来管辖的那些新键物品（旧存档不迁移）。
+     *
+     * @return 规范化后的分类串；认不出返回 null
+     */
     public static String normalizeCategory(String raw) {
-        if (raw == null) {
-            return null;
-        }
-        String s = raw.trim().toLowerCase(Locale.ROOT);
-        if (s.isEmpty()) {
-            return null;
-        }
-        for (String c : Categories.ORDER) {
-            if (c.equalsIgnoreCase(raw.trim()) || c.toLowerCase(Locale.ROOT).equals(s)) {
-                return c;
-            }
-        }
-        return null;
+        return Categories.resolve(raw);
     }
 
     /** 给指令用的分类清单（写成人话） */
     public static String categoryListText() {
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < Categories.ORDER.size(); i++) {
+        List<String> cats = Categories.order();
+        for (int i = 0; i < cats.size(); i++) {
             if (i > 0) {
                 sb.append(" / ");
             }
-            sb.append(Categories.ORDER.get(i));
+            sb.append(Categories.displayName(cats.get(i)));
         }
         return sb.toString();
     }

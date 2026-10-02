@@ -359,9 +359,13 @@ public final class IndexRefresh {
      * @return {@link #MISSING} 表示这个坐标现在不是容器
      */
     private static long sigOf(ServerLevel level, BlockPos pos) {
-        if (!(level.getBlockEntity(pos) instanceof Container own)) {
+        BlockEntity be = level.getBlockEntity(pos);
+        // 「算不算仓库容器」只有 Containers 一个判据：被排除的方块（雕纹书架 / 架子）当作 MISSING，
+        // 于是轮询会把旧索引里残留的那两条记录当成幽灵删掉，并让所在区域重扫一次
+        if (!Containers.isWarehouseContainer(level, pos, be)) {
             return MISSING;
         }
+        Container own = (Container) be;
         BlockState state = level.getBlockState(pos);
         BlockPos partner = Scanner.partnerOf(level, pos, state);
         Container other = partner != null && level.getBlockEntity(partner) instanceof Container c2 ? c2 : null;

@@ -18,7 +18,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
 import net.minecraft.world.Containers;
-import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
@@ -320,7 +319,7 @@ public final class Porter {
 
     // ------------------------------------------------------------------
     // 空闲：每个假人各自站在值守点上待命；玩家丢给它的东西它捡起来送回仓库；
-    // 没活干的时候还能执行「整理仓库 / 清扫地面」任务（见 Tasks）
+    // 没活干的时候还能执行「整理仓库」任务（见 Tasks）
 
     /** 一个假人的空闲状态（每个假人一份） */
     private static final class Idle {
@@ -357,9 +356,6 @@ public final class Porter {
             return;
         }
         ServerPlayer bot = Body.get(server, botName);
-        if (bot != null) {
-            pickUpNearby(bot);
-        }
         if (bot != null && pickCollectTarget(server, botName, bot, s)) {
             s.collecting = true;
             return;
@@ -376,35 +372,6 @@ public final class Porter {
         }
         if (Body.ensure(server, botName, home.level(), home.x(), home.y(), home.z())) {
             Body.moveTo(server, botName, home.level(), home.x(), home.y(), home.z());
-        }
-    }
-
-    /**
-     * 把脚边玩家丢下的东西收进自己的背包。
-     *
-     * 为什么不靠原版捡拾：{@code ItemEntity.playerTouch} 只允许「丢东西的那个人」自己捡
-     * （owner 必须等于捡的人的 UUID），玩家用 Q 丢出来的东西 owner 就是玩家自己，
-     * 搬运工作为另一个玩家永远捡不到。所以这里自己动手：碰到就清掉拾取延迟、
-     * 直接塞进背包、把地上的实体收走。
-     */
-    private static void pickUpNearby(ServerPlayer bot) {
-        List<ItemEntity> near = bot.level()
-                .getEntitiesOfClass(ItemEntity.class, bot.getBoundingBox().inflate(3.0, 2.0, 3.0));
-        for (ItemEntity e : near) {
-            if (!e.isAlive()) {
-                continue;
-            }
-            ItemStack s = e.getItem();
-            if (s.isEmpty()) {
-                continue;
-            }
-            if (bot.getInventory().add(s)) {
-                if (s.isEmpty()) {
-                    e.discard();
-                } else {
-                    e.setItem(s);
-                }
-            }
         }
     }
 

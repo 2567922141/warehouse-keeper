@@ -26,6 +26,19 @@ Warehouse Keeper 是面向 Minecraft 26.2 的 Fabric 模组，用于集中管理
 - **容器标签**：可为箱子设置分类标签、自动分类与暂存标记，容器界面显示统一的标签栏；分类键默认是原版创造栏页签，0.20 及更早的中文类目名仍可作为父类使用（贴着旧名的箱子照旧收下辖物品）。归类时优先选择与本物品所属分类**完全同名**的目标箱，其次才是贴旧中文类目名的箱子，父类兜底排在最后 —— 贴了「酿造附魔」的箱子不会再被更近的箱子抢走附魔书。标签栏默认自动选择左/右侧或横向条带，也可在面板「维护」页固定到某一侧（设置存在客户端配置文件里）；标签栏只在真正打开的容器界面上出现，物品栏与创造模式物品栏上不会再残留。
 - **权限与审计**：按玩家授予取货、指挥、整理三种权限，管理员（OP）可查看操作日志。
 
+## 游戏实机演示截图
+
+![仓库界面](./photo/image.png)
+
+![取货界面](./photo/image-2.png)
+
+![搬运工管理界面](./photo/image-3.png)
+
+![箱子内部界面（更多箱子）](./photo/image-4.png)
+
+
+
+
 ## 运行环境
 
 | 组件 | 版本要求 |
@@ -207,7 +220,7 @@ src/main/resources/        fabric.mod.json 与语言文件
 
 ## 模组兼容性
 
-- 适配更多箱子：[Iron Chests（cyberanner-ironchest）](https://modrinth.com/mod/cyberanner-ironchest)
+- [更多箱子 Iron Chests](https://modrinth.com/mod/cyberanner-ironchest)
 - [Carpet](https://modrinth.com/mod/carpet)：安装后搬运工以可见人形出现；不装也能正常取货与整理
 
 ## 许可证

@@ -60,7 +60,13 @@ public class WarehouseClient implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (openKey.consumeClick()) {
-                open(client);
+                // 0.23.0 · BUG3：没判空就直接 setScreenAndShow 会把别人开着的容器界面「顶掉」，
+                // 而 26.2 的 Gui.setScreen 只调 removed()、不调 onClose()，于是 player.containerMenu
+                // 卡在旧箱子菜单上（BUG3 的根因之一）。现在只在自己没开界面 / 已经开着本模组界面时开。
+                if (client.gui == null || client.gui.screen() == null
+                        || client.gui.screen() instanceof WarehouseScreen) {
+                    open(client);
+                }
             }
             RegionCache.refresh(false);
             RegionBorder.validate();

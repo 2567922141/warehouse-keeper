@@ -28,6 +28,15 @@ public final class ClientSnapshot {
         public int refs;
         /** 悬停提示用：位置 + 第几格（服务端拼好） */
         public String loc = "";
+        /**
+         * 0.23.0：这一行的附魔组合（{@code 注册名@等级} 用 {@code ,} 连接）；空 = 无附魔。
+         *
+         * <p>服务端把附魔书/附魔装备按附魔拆成了多行，所以同一件物品会出现多行，靠这个字段区分。
+         * 老服务端不发这个字段 ⇒ 空串 ⇒ 与老版本行为一致。
+         */
+        public String ench = "";
+        /** 这一行里出现过的自定义名（{@code ; } 连接）；空 = 没改名 */
+        public String customName = "";
     }
 
     /** 箱子总览的一行（批次 4）。双联箱在服务端索引里就是一条记录，所以一只箱子一行 */
@@ -186,6 +195,12 @@ public final class ClientSnapshot {
                         }
                         if (it.name == null) {
                             it.name = "";
+                        }
+                        if (it.ench == null) {
+                            it.ench = "";
+                        }
+                        if (it.customName == null) {
+                            it.customName = "";
                         }
                     }
                 }

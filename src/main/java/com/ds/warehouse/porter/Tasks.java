@@ -7,6 +7,7 @@ import com.ds.warehouse.config.ContainerTags;
 import com.ds.warehouse.config.Region;
 import com.ds.warehouse.config.RegionStore;
 import com.ds.warehouse.index.ContainerRecord;
+import com.ds.warehouse.index.Containers;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.IndexRefresh;
 import com.ds.warehouse.index.Scanner;
@@ -203,6 +204,13 @@ public final class Tasks {
         boolean limited;
         /** 批次 3（附录 J.6）：这一轮里有多少件被送进了「贴了标签的目标箱」 */
         int tagMoves;
+        /**
+         * 0.23.0：这一轮里有多少件是在<b>同一个箱子内部</b>为了排顺序而搬的（{@code planIn} 的 ② 箱内排序）。
+         *
+         * <p>它与 {@link #moved} 是「总数与其中一部分」的关系：{@code moved - sorted} 就是跨箱归类的件数。
+         * 报告里要把两者分开写 —— 用户看不到「箱内排序到底动没动」，就会以为排序没生效。
+         */
+        int sorted;
         /** 表演节奏：下一件要到哪一刻才动手（服务端 tick 计数，间隔见 {@link AppConfig#tidyTicksPerMove}） */
         int nextMoveTick;
         /** 现在开着盖子的那只箱子（换箱子 / 收工时要把它盖上，免得箱盖一直敞着） */
@@ -444,6 +452,17 @@ public final class Tasks {
         String cost = "用时 " + (ms / 1000) + " 秒。";
         String more = j.limited ? "到上限了，再执行一次继续。" : "";
         if (j.kind == TIDY) {
+            // 0.23.0：把「箱内排序」与「跨箱归类」分开报 —— 用户看不到箱内排序动没动，
+            // 就会以为「箱内排序没生效」。moved 是两者之和，sorted 只是其中一部分。
+            int cross = Math.max(0, j.moved - j.sorted);
+            String detail = "";
+            if (j.sorted > 0 && cross > 0) {
+                detail = "（箱内排序 " + j.sorted + " 件、跨箱归类 " + cross + " 件）";
+            } else if (j.sorted > 0) {
+                detail = "（都是箱内排序 " + j.sorted + " 件）";
+            } else if (cross > 0) {
+                detail = "（都是跨箱归类 " + cross + " 件）";
+            }
             String tagged = j.tagMoves > 0 ? "其中 " + j.tagMoves + " 件按标签投箱。" : "";
             // 一件没搬时不能只报 0/0 —— 玩家会以为「功能坏了」。说清楚为什么没活可干
             String idle = "";
@@ -457,7 +476,7 @@ public final class Tasks {
                     idle = "（" + boxes + " 只箱子都已就位，没有要改投的物品）";
                 }
             }
-            return "整理完成：合并 " + j.merged + " 组，归位 " + j.moved + " 件。" + tagged + idle
+            return "整理完成：合并 " + j.merged + " 组，归位 " + j.moved + " 件" + detail + "。" + tagged + idle
                     + cost + skip + more + carried + tail;
         }
         // （优化4）现在只剩 TIDY 一种任务；万一将来有别的类型，也给一句不含清扫字样的通用文案
@@ -936,6 +955,9 @@ public final class Tasks {
                 if (!inRegion(region, r.dimension(), r.pos())) {
                     continue; // D5-b：别人的仓库不配当「家」，连候选都不算
                 }
+                if (Containers.noTidy(r.blockId())) {
+                    continue; // 0.23.0 · 优化5：熔炉 / 漏斗 / 雕纹书架等只可查看，绝不当目标箱
+                }
                 String k = WarehouseIndex.key(r.dimension(), r.pos());
                 if (isStagingKey(k)) {
                     continue; // 批次 3 · B14：暂存箱「只出不进」，连候选都不算
@@ -964,6 +986,7 @@ public final class Tasks {
         Spot memFixed = normalizeHome(server, id, mem);
         if (memFixed != null && inRegion(region, memFixed.dimension(), memFixed.pos())
                 && !isStagingKey(WarehouseIndex.key(memFixed.dimension(), memFixed.pos()))
+                && !noTidySpot(memFixed) // 0.23.0 · 优化5：记忆里的家落在熔炉 / 漏斗里也不认
                 && hasRoom(server, memFixed, stack)) {
             return memFixed;
         }
@@ -991,8 +1014,12 @@ public final class Tasks {
     /**
      * 批次 3（附录 J.3/J.6/J.7）：这种东西有没有「贴了标签的目标箱」。
      *
-     * <p>优先级：手动档箱的手动分类（2）&gt; 自动档箱的自动分类（1）&gt; 暂存箱兜底（0，只在分类是
-     * 「其他」且确实没有别的目标箱时才允许 —— 暂存箱「只出不进」是 B14）。同一档里按 B15
+     * <p><b>0.23.0 · BUG1</b>：候选箱先按「标签精确度」{@link Categories#matchRank} 排 ——
+     * 与物品新页签键同键（0）&gt; 与物品旧中文类目名同名（1）&gt; 旧父类兜底（2）&gt; 暂存箱（3）。
+     * 少了这一维，旧中文标签「酿造附魔」「矿物金属」都匹配附魔书，谁近谁赢，指定类目的空箱反而没人收。
+     *
+     * <p>同一精确度里：手动档箱的手动分类（2）&gt; 自动档箱的自动分类（1）&gt; 暂存箱兜底（0，只在分类是
+     * 「其他」且确实没有别的目标箱时才允许 —— 暂存箱「只出不进」是 B14）。再往里按 B15
      * 「最集中 → 最近」排：先挑已经装着这种物品最多的箱子，再挑离来源最近的，最后按坐标 key
      * 定序（保证每一轮的结果一样，不会来回晃）。
      *
@@ -1025,22 +1052,34 @@ public final class Tasks {
             if (tag == null) {
                 continue;
             }
+            int rank;
             if (tag.staging) {
                 if (!allowStaging) {
                     continue; // B14：暂存箱只出不进
                 }
-            } else if (!Categories.matches(tag.effectiveCategory(), category)) {
-                continue;
+                rank = STAGING_RANK; // 暂存箱排在所有真实分类之后
+            } else {
+                // 0.23.0 · BUG1：候选箱不只是「匹不匹配」，还要看「贴不贴切」——
+                // 与物品新页签键同键(0) > 与物品旧中文类目名同名(1) > 旧父类兜底(2)
+                rank = Categories.matchRank(tag.effectiveCategory(), id);
+                if (rank < 0) {
+                    continue;
+                }
             }
             int prio = tag.staging ? 0 : (tag.isAutoMode() ? 1 : 2);
-            cands.add(new TagCand(prio, counts.getOrDefault(key, 0L), distanceSq(from, rec), key,
+            cands.add(new TagCand(rank, prio, counts.getOrDefault(key, 0L), distanceSq(from, rec), key,
                     new Spot(rec.dimension, rec.pos)));
         }
         if (cands.isEmpty()) {
             return null;
         }
         cands.sort((a, b) -> {
-            int c = Integer.compare(b.prio(), a.prio());
+            // 0.23.0 · BUG1：标签精确度最高优先（0 最精确），同精确度才比档位 / 集中度 / 距离
+            int c = Integer.compare(a.rank(), b.rank());
+            if (c != 0) {
+                return c;
+            }
+            c = Integer.compare(b.prio(), a.prio());
             if (c != 0) {
                 return c;
             }
@@ -1062,8 +1101,15 @@ public final class Tasks {
         return null;
     }
 
-    /** 标签候选箱（批次 3 · B15 排序用）：档位越高越优先，同档先看「最集中」再看「最近」 */
-    private record TagCand(int prio, long count, long dist, String key, Spot spot) {
+    /** 暂存箱的「标签精确度」：排在 0/1/2 之后，只有分类是「其他」时才轮得到（B14 / J.7） */
+    private static final int STAGING_RANK = 3;
+
+    /**
+     * 标签候选箱（批次 3 · B15 排序用；0.23.0 · BUG1 起加「标签精确度」）：
+     * {@link Categories#matchRank} 越小越对口（0 同键 / 1 与旧中文名同名 / 2 旧父类兜底 / 3 暂存箱），
+     * 精确度相同再看档位（暂存 0 &lt; 自动 1 &lt; 手动 2），然后「最集中」，最后「最近」。
+     */
+    private record TagCand(int rank, int prio, long count, long dist, String key, Spot spot) {
     }
 
     /** 索引里这种东西在各箱子各有多少（只算本区域，D5-b），供 B15「最集中」用 */
@@ -1178,6 +1224,21 @@ public final class Tasks {
         return null;
     }
 
+    /**
+     * 这个坐标上的箱子是不是「可查看、但不整理」的容器（0.23.0 · 优化5）。
+     *
+     * <p>直接查索引里的 {@link ContainerRecord#blockId}，不去读世界方块：整理路径每 tick 都会问，
+     * 不能为它碰区块。索引里没有这条记录（还没扫到）就当作可整理。
+     */
+    private static boolean noTidySpot(Spot spot) {
+        if (spot == null || spot.pos() == null) {
+            return false;
+        }
+        ContainerRecord rec = WarehouseMod.INDEX.containers.get(
+                WarehouseIndex.key(spot.dimension(), spot.pos()));
+        return rec != null && Containers.noTidy(rec.blockId);
+    }
+
     /** 目标箱子还有没有位置放这件东西 */
     private static boolean hasRoom(MinecraftServer server, Spot spot, ItemStack stack) {
         if (spot == null || spot.pos() == null) {
@@ -1227,6 +1288,7 @@ public final class Tasks {
             c.setItem(src.index(), ItemStack.EMPTY);
             c.setChanged();
             j.moved += n;
+            j.sorted += n; // 0.23.0：同箱内把这一摞搬到该在的格子，是「箱内排序」，与跨箱归类分开报数
             j.dirty = true;
             j.touch(m.fromDim(), m.from());
             return;
@@ -1498,6 +1560,9 @@ public final class Tasks {
         for (ContainerRecord rec : WarehouseMod.INDEX.containers.values()) {
             if (rec == null || rec.pos == null) {
                 continue;
+            }
+            if (Containers.noTidy(rec.blockId)) {
+                continue; // 0.23.0 · 优化5：熔炉 / 漏斗 / 雕纹书架等「可查看但不整理」
             }
             for (Region r : regions) {
                 if (Scanner.dimensionOf(r).equals(rec.dimension) && r.contains(rec.pos)) {

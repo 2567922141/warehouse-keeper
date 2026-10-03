@@ -49,6 +49,22 @@ public final class CategoryRules {
     public static final String OTHER = "warehouse-keeper:other";
 
     /**
+     * 旧中文兜底类目名（字面量「其他」）—— {@link #ORDER} / {@link #LEGACY} 里的最后那一项。
+     *
+     * <p><b>千万别拿它跟 {@link #OTHER} 混用</b>：{@code OTHER} 是 0.21.0 的合成类目<b>键</b>
+     * （{@code warehouse-keeper:other}），而 {@link #ORDER} 是按旧中文名建的序表，
+     * 里面的字面量是「其他」—— 两者 {@code equals} 不成立。
+     *
+     * <p>0.21.0 改造类目键时漏了这一处：{@code SUFFIX.put("_spawn_egg", c(OTHER))} 把合成键喂给了
+     * {@link #c}，于是 {@code SUFFIX["_spawn_egg"] = ORDER.indexOf("warehouse-keeper:other") = -1}，
+     * 任何刷怪蛋走 {@link #suffixOf} 都会 {@code ORDER.get(-1)} ⇒
+     * {@code ArrayIndexOutOfBoundsException: Index -1 out of bounds for length 10}。
+     * {@code Categories.children()} 推导时遍历注册表必然碰到刷怪蛋，于是「整理仓库」一开工就中止
+     * （0.23.0 实机复现）。**别再改回 {@code c(OTHER)}。**
+     */
+    public static final String OTHER_LEGACY = "其他";
+
+    /**
      * 十个旧中文类目名 —— <b>现在它们是「父类」</b>，不再是判定结果。
      *
      * <p>旧存档的 {@code container-tags.json} 里写着这些名字，用户拍板不迁移、不改写：
@@ -56,7 +72,7 @@ public final class CategoryRules {
      * 常量本身保留字面量，任何写盘/读盘路径都还能拿到它们。
      */
     public static final List<String> LEGACY = List.of(
-            MINERAL, BUILD, WOOD, TOOL, FOOD, FARM, REDSTONE, MAGIC, CONTAINER, "其他");
+            MINERAL, BUILD, WOOD, TOOL, FOOD, FARM, REDSTONE, MAGIC, CONTAINER, OTHER_LEGACY);
 
     /**
      * 旧中文类目的显示顺序（也是同档平手时的优先级）。
@@ -67,15 +83,17 @@ public final class CategoryRules {
      * ③ 客户端标签环 {@code client/ContainerTagBar}。刻意不把它换成页签键 —— 本类必须保持零 Minecraft 依赖。
      */
     public static final List<String> ORDER = List.of(
-            MINERAL, BUILD, WOOD, TOOL, FOOD, FARM, REDSTONE, MAGIC, CONTAINER, "其他");
+            MINERAL, BUILD, WOOD, TOOL, FOOD, FARM, REDSTONE, MAGIC, CONTAINER, OTHER_LEGACY);
 
     /**
      * 规则表版本。**改动下面任何一张表就要 +1** —— 索引文件里存着上次算好的分类表，
      * 版本对不上就丢弃重算，免得规则改过之后还拿旧结果当答案。
      *
      * <p>5：类目键从自研中文常量换成创造页签注册键（0.21.0）。
+     * <p>6：修 {@code SUFFIX["_spawn_egg"]} 误用合成键 {@link #OTHER} 导致的
+     * {@code ORDER.get(-1)}（0.23.0，见 {@link #OTHER_LEGACY}）。
      */
-    public static final int VERSION = 5;
+    public static final int VERSION = 6;
 
     /** 强形制：这个词一出现，几乎就定了 */
     private static final int STRONG = 0;
@@ -96,6 +114,19 @@ public final class CategoryRules {
 
     private static int c(String name) {
         return ORDER.indexOf(name);
+    }
+
+    /**
+     * 类别序号 → 旧中文类目名。
+     *
+     * <p>{@link #c} 认不出名字时返回 {@code -1}，而 {@code -1} 曾经被直接存进
+     * {@code SUFFIX}（见 {@link #OTHER_LEGACY} 的说明），于是 {@code ORDER.get(-1)} 抛
+     * {@code ArrayIndexOutOfBoundsException} 把整条整理链打断。
+     * 这里统一兜住：越界（含 -1）返回 {@code null}，交给上层的「没命中」语义，
+     * 绝不让某张表填错一个数就把功能整个打掉。
+     */
+    private static String nameOf(int idx) {
+        return idx >= 0 && idx < ORDER.size() ? ORDER.get(idx) : null;
     }
 
     private static void put(int prio, String category, String... keys) {
@@ -210,7 +241,7 @@ public final class CategoryRules {
     private static final Map<String, Integer> SUFFIX = new HashMap<>();
 
     static {
-        SUFFIX.put("_spawn_egg", c(OTHER));
+        SUFFIX.put("_spawn_egg", c(OTHER_LEGACY));
         SUFFIX.put("_bucket", c(CONTAINER));
     }
 
@@ -236,7 +267,7 @@ public final class CategoryRules {
         String[] tok = split(path);
         int bestPrio = 99;
         int bestSpec = 0;
-        int bestCat = c(OTHER);
+        int bestCat = c(OTHER_LEGACY);
 
         for (String t : tok) {
             Integer v = TOKENS.get(t);
@@ -267,7 +298,7 @@ public final class CategoryRules {
                 bestCat = cat;
             }
         }
-        return bestPrio == 99 ? null : ORDER.get(bestCat);
+        return bestPrio == 99 ? null : nameOf(bestCat);
     }
 
     /** 词元表里认识多少条（给指令/自检看的） */
@@ -301,7 +332,7 @@ public final class CategoryRules {
             return null;
         }
         Integer v = EXACT.get(path);
-        return v == null ? null : ORDER.get(v);
+        return v == null ? null : nameOf(v);
     }
 
     /** 后缀钉死：命中就返回**命中的那个后缀**（给「证据」显示用），否则 null */
@@ -320,7 +351,7 @@ public final class CategoryRules {
     /** 后缀钉死：命中返回类别名，否则 null */
     public static String suffixOf(String path) {
         String k = suffixHit(path);
-        return k == null ? null : ORDER.get(SUFFIX.get(k));
+        return k == null ? null : nameOf(SUFFIX.get(k));
     }
 
     /**

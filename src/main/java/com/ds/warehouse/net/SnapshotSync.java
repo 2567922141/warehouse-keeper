@@ -7,6 +7,9 @@ import com.ds.warehouse.config.RegionStore;
 import com.ds.warehouse.index.ContainerRecord;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.Scanner;
+import com.ds.warehouse.index.WarehouseIndex;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.item.ItemStack;
 import com.ds.warehouse.porter.Body;
 import com.ds.warehouse.porter.Bots;
 import com.ds.warehouse.porter.Porter;
@@ -294,18 +297,16 @@ public final class SnapshotSync {
             rd.capacity = view.capacity;
             rd.items = new ArrayList<>();
             int n = 0;
+            outer:
             for (WebSnapshot.ItemRow row : view.items) {
-                if (n++ >= MAX_ITEMS_PER_REGION) {
-                    dto.truncated = true;
-                    break;
+                // 0.23.0：附魔书/附魔装备按附魔拆行（同一件物品可能有十几种附魔组合）
+                for (ItemDto item : variantItems(row)) {
+                    if (n++ >= MAX_ITEMS_PER_REGION) {
+                        dto.truncated = true;
+                        break outer;
+                    }
+                    rd.items.add(item);
                 }
-                ItemDto item = new ItemDto();
-                item.id = row.id;
-                item.name = row.name;
-                item.count = row.count;
-                item.refs = row.refs;
-                item.loc = locationText(row);
-                rd.items.add(item);
             }
 
             // 箱子总览（批次 4）：一只箱子一行。
@@ -391,8 +392,88 @@ public final class SnapshotSync {
         if (row.locations.isEmpty()) {
             return "";
         }
-        WebSnapshot.LocRow loc = row.locations.get(0);
-        return loc.pos + " 第 " + (loc.slot + 1) + " 格" + (row.refs > 1 ? "，共 " + row.refs + " 处" : "");
+        return locText(row.locations.get(0), row.refs);
+    }
+
+    /** 一格的「位置 + 第几格（+ 共几处）」文案；{@code refs} 是这个变体/物品占的处数 */
+    private static String locText(WebSnapshot.LocRow loc, int refs) {
+        return loc.pos + " 第 " + (loc.slot + 1) + " 格" + (refs > 1 ? "，共 " + refs + " 处" : "");
+    }
+
+    /**
+     * 把索引里的一只物品（{@code ItemRow}）拆成「附魔变体」若干行。
+     *
+     * <p>0.23.0：取货页要能看见属性、按附魔精确取货，所以**每种附魔组合单独一行**。
+     * 逐格附魔从内存索引里现取（与 {@code ViewQueryService.itemMeta} 同一份数据、同一格式），
+     * 不重扫世界。没有附魔的物品照旧只有一行（{@code ench} 为空串），行为与老版本完全一致。
+     *
+     * <p>索引里查不到的格子（幽灵箱子）不能凭空丢掉它们的件数：先把能算的加起来、记下总和，
+     * 最后把差额并进「无附魔」那一行，保证各行件数之和 = {@code row.count}。
+     */
+    private static List<ItemDto> variantItems(WebSnapshot.ItemRow row) {
+        List<ItemDto> out = new ArrayList<>();
+        Map<String, ItemDto> byEnch = new LinkedHashMap<>();
+        Map<String, WebSnapshot.LocRow> firstLoc = new LinkedHashMap<>();
+        long resolved = 0;
+        for (WebSnapshot.LocRow loc : row.locations) {
+            String ench = "";
+            String custom = "";
+            int count = 0;
+            boolean found = false;
+            ContainerRecord rec = WarehouseMod.INDEX.containers.get(
+                    WarehouseIndex.key(loc.dimension, new BlockPos(loc.x, loc.y, loc.z)));
+            if (rec != null) {
+                for (ContainerRecord.StoredStack ss : rec.contents) {
+                    if (ss.slot() != loc.slot) {
+                        continue;
+                    }
+                    ItemStack st = ss.stack();
+                    ench = Scanner.enchantText(st);
+                    custom = Scanner.customNameText(st);
+                    count = st.getCount();
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                resolved += count;
+            }
+            ItemDto dto = byEnch.get(ench);
+            if (dto == null) {
+                dto = new ItemDto();
+                dto.id = row.id;
+                dto.name = row.name;
+                dto.ench = ench;
+                byEnch.put(ench, dto);
+                firstLoc.put(ench, loc);
+                out.add(dto);
+            }
+            dto.count += count;
+            dto.refs++;
+            if (!custom.isEmpty() && !dto.customName.contains(custom)) {
+                dto.customName = dto.customName.isEmpty() ? custom : dto.customName + "; " + custom;
+            }
+        }
+        long rest = row.count - resolved;
+        if (rest > 0 || out.isEmpty()) {
+            ItemDto plain = byEnch.get("");
+            if (plain == null) {
+                plain = new ItemDto();
+                plain.id = row.id;
+                plain.name = row.name;
+                plain.loc = locationText(row);
+                out.add(plain);
+            }
+            plain.count += Math.max(0, rest);
+        }
+        // 处数只有遍历完才知道，位置文案最后重新拼一遍（首格 + 这个变体自己的处数）
+        for (Map.Entry<String, WebSnapshot.LocRow> e : firstLoc.entrySet()) {
+            ItemDto dto = byEnch.get(e.getKey());
+            if (dto != null) {
+                dto.loc = locText(e.getValue(), dto.refs);
+            }
+        }
+        return out;
     }
 
     /**
@@ -561,6 +642,15 @@ public final class SnapshotSync {
         long count;
         int refs;
         String loc;
+        /**
+         * 0.23.0：附魔组合（{@code 注册名@等级} 用 {@code ,} 连接）；空 = 无附魔。
+         *
+         * <p>取货页据此把附魔书/附魔装备**按附魔分行**显示，点哪一行就用
+         * {@code <物品>#<这个串>} 下单，服务端逐格按集合比对后只取对得上的那些。
+         */
+        String ench = "";
+        /** 同一变体里出现过的自定义名（{@code ; } 连接）；空 = 没改名 */
+        String customName = "";
     }
 
     static final class BotDto {

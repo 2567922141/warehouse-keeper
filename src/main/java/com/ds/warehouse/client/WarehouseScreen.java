@@ -2,6 +2,7 @@ package com.ds.warehouse.client;
 
 import com.ds.warehouse.WarehouseMod;
 import com.ds.warehouse.net.ViewQueryPayload;
+import com.ds.warehouse.util.Categories;
 import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -167,7 +168,7 @@ public class WarehouseScreen extends Screen {
     private R notesBox;
     private int rowH;
     /**
-     * 「搬运工」页的分配那一行：说明 / 仓库选择框 / 确定按钮。
+     * 「搬运工」页的分配那一行：说明 / 显示名输入框 / 设显示名 / 仓库选择框 / 确定按钮。
      * 选好之后 {@code assignList} 才是展开的仓库清单（弹出层，画在最上面，不算布局叶子）。
      */
     private R assignRow;
@@ -175,6 +176,20 @@ public class WarehouseScreen extends Screen {
     private R assignPick;
     private R assignOk;
     private R assignList;
+    /** 0.23.0 · 优化7：「分配」行上的显示名输入框矩形 + 「设显示名」按钮矩形（太窄时为 null） */
+    private R assignNameRect;
+    private R assignSetRect;
+    /** 显示名输入框本体（每次 init 重建；窄到放不下时为 null） */
+    private EditBox assignNameBox;
+    /**
+     * 正在编辑的显示名草稿 + 它属于哪个搬运工。
+     *
+     * <p>为什么非要存字段：服务端下发的新显示名会改 {@code botSig()}，进而触发
+     * {@link #rebuildWidgets()} —— 输入框是新建的，不存草稿就会把玩家正在敲的字清空。
+     * 换到另一个搬运工（{@code owner} 对不上）时才清空，草稿永远属于某一个人。
+     */
+    private String assignNameDraft = "";
+    private String assignNameOwner = "";
     /** 展开中的仓库清单：可显示的行数与滚动位置 */
     private int assignRows;
     private int assignScroll;
@@ -255,6 +270,22 @@ public class WarehouseScreen extends Screen {
     private String boxDetailKey = "";
     /** 容器详情的滚动位置 */
     private int boxDetailScroll;
+
+    // 0.23.0：各列表右缘的可拖动滚动条（轨道几何在各自 draw 里登记，见 ScrollBar）
+    private final ScrollBar sbRegions = new ScrollBar();
+    private final ScrollBar sbInfo = new ScrollBar();
+    private final ScrollBar sbItemDetail = new ScrollBar();
+    private final ScrollBar sbBoxes = new ScrollBar();
+    private final ScrollBar sbBoxDetail = new ScrollBar();
+    private final ScrollBar sbPick = new ScrollBar();
+    private final ScrollBar sbAssign = new ScrollBar();
+    /**
+     * 0.23.0：搬运工名册 / 权限用户表 / 审计日志这三份清单共用同一块 {@code rowsBox}，
+     * 而且以前都只画「前 N 行」（超出的既看不到也点不到），所以共用一条滚动条 + 一个滚动位置。
+     */
+    private final ScrollBar sbRows = new ScrollBar();
+    /** rowsBox 那份清单的滚动位置（按行算） */
+    private int rowScroll;
     /** 箱子页关键字（坐标或方块名；空 = 不过滤） */
     private String boxFilter = "";
     private EditBox boxFilterBox;
@@ -515,7 +546,30 @@ public class WarehouseScreen extends Screen {
         layoutCheck();
     }
 
+    /** 0.23.0：换页 / 重排前把各列表滚动条的几何与拖动状态清掉（避免点到上一页留下的位置） */
+    private void resetScrollBars() {
+        sbRegions.reset();
+        sbInfo.reset();
+        sbItemDetail.reset();
+        sbBoxes.reset();
+        sbBoxDetail.reset();
+        sbPick.reset();
+        sbAssign.reset();
+        sbRows.reset();
+        if (pickDd != null) {
+            pickDd.releaseDrag();
+        }
+        if (taskDd != null) {
+            taskDd.releaseDrag();
+        }
+        if (catDd != null) {
+            catDd.releaseDrag();
+        }
+    }
+
     private void clearTabRegions() {
+        resetScrollBars();
+        rowScroll = 0;
         listBox = null;
         searchRow = null;
         infoCap = null;
@@ -558,6 +612,9 @@ public class WarehouseScreen extends Screen {
         assignLabel = null;
         assignPick = null;
         assignOk = null;
+        assignNameRect = null;
+        assignSetRect = null;
+        assignNameBox = null;
         assignList = null;
         assignRows = 0;
         pickOpen = false;
@@ -790,8 +847,27 @@ public class WarehouseScreen extends Screen {
         if (assignRow != null && !assignRow.empty()) {
             int okW = Math.max(52, Math.min(72, assignRow.w() / 5));
             int pickW = Math.max(70, Math.min(200, assignRow.w() * 40 / 100));
-            int labelW = Math.max(0, assignRow.w() - okW - pickW - GAP * 2);
+            int setW = Math.max(52, Math.min(84, assignRow.w() / 6));
+            // 0.23.0 · 优化7：这一行左起是「说明 | 显示名输入框 | 设显示名 | 选择仓库 ▾ | 确定」，
+            // 四个间隔分开摆 —— 全部由这一处算出来，绘制/命中都不再另算几何。
+            int rest = assignRow.w() - okW - pickW - setW - GAP * 4;
+            int labelW;
+            int nameW;
+            if (rest >= 96) {
+                labelW = Math.min(96, rest / 3);   // 宽裕：说明文字与输入框都留
+                nameW = rest - labelW;
+            } else if (rest >= 40) {
+                labelW = 0;                        // 挤：先砍说明文字，宽度让给输入框
+                nameW = rest;
+            } else {
+                labelW = Math.max(0, rest + setW); // 太窄：不建输入框/按钮，把宽度还给说明文字
+                nameW = 0;
+            }
             assignLabel = new R(assignRow.x(), assignRow.y(), labelW, assignRow.h());
+            int cursor = assignRow.x() + labelW + GAP;
+            assignNameRect = nameW > 0 ? new R(cursor, assignRow.y(), nameW, assignRow.h()) : null;
+            cursor += nameW + GAP;
+            assignSetRect = nameW > 0 ? new R(cursor, assignRow.y(), setW, assignRow.h()) : null;
             assignPick = new R(assignRow.right() - okW - GAP - pickW, assignRow.y(), pickW, assignRow.h());
             assignOk = new R(assignRow.right() - okW, assignRow.y(), okW, assignRow.h());
         }
@@ -1010,10 +1086,21 @@ public class WarehouseScreen extends Screen {
         return w + 16;
     }
 
-    /** 仓库列表每行的高度：名字一行 + 详情最多两行，按实际折行结果算 */
+    /**
+     * 仓库列表每行的高度：名字一行 + 详情最多两行，按实际折行结果算。
+     *
+     * <p>BUG4（0.23.0）：列表第 0 行是合成的「全部仓库」，它的 meta **恒为 2 行**
+     * （{@link #allRegionsMeta}），而这段折行只统计了真实仓库 —— 于是「全部仓库」那一行实际要
+     * 3 行文字，行高却只有 {@code LINE_H*2+6 = 28}，第三行（「共 N 个仓库」）直接压到下一行行首上。
+     * 现在行数初值就取第 0 行的行数，行高至少 {@code LINE_H*3+6 = 39}。
+     *
+     * <p>宽度口径也必须和绘制完全一致：绘制时 {@code row.w() = listBox.w() - 4}、
+     * {@code metaW = row.w() - 12}，即 {@code listW - 16}；这里原来按 {@code listW - 12} 算，
+     * 每行多给 4px，真实仓库可能因此少折出一行（同样会压行）。
+     */
     private int regionRowHeight(int listW) {
-        int room = Math.max(24, listW - 12);
-        int lines = 1;
+        int room = Math.max(24, listW - 16);
+        int lines = allRegionsMeta(RegionCache.list().size()).size();
         for (RegionCache.Entry e : RegionCache.list()) {
             lines = Math.max(lines, metaLines(e, room).size());
         }
@@ -1030,7 +1117,8 @@ public class WarehouseScreen extends Screen {
         List<R> leaves = new ArrayList<>();
         for (R r : new R[]{headerTitle, tabs, subTabs, captionLeft, captionRight, statusBox, closeBtn, listBox,
                 searchRow, boxRow, boxSearchRow, boxBox, infoCapLeft, infoCapRight, infoBox, infoBlock, gridBox,
-                pickRow, pickCap, pickBox, orderRow, rowsBox, footRow, notesBox, assignLabel, assignPick, assignOk}) {
+                pickRow, pickCap, pickBox, orderRow, rowsBox, footRow, notesBox, assignLabel, assignNameRect,
+                assignSetRect, assignPick, assignOk}) {
             if (r == null || r.empty()) {
                 continue;
             }
@@ -1075,6 +1163,60 @@ public class WarehouseScreen extends Screen {
                         tops[i], tw, Math.max(0, r.w() - 4), this.width, this.height, tab);
             }
         }
+        // 行块自检（BUG4 防回归）：自绘列表里每一行的「文字块」底部都不能越过下一行的行首。
+        // 只报告、不自动修 —— 几何全部由 layout() 一处算出来，这里只负责把「算少了行」立刻喊出来。
+        checkRegionRows();
+        if (boxBox != null && !boxBox.empty()) {
+            int n = Math.min(8, Math.max(1, rowsVisible(boxBox, BOX_ROW_H)));
+            checkRowBlocks("箱子清单", boxBox.y() + 2, BOX_ROW_H, 3, 2 * LINE_H, n);
+        }
+        if (rowsBox != null && !rowsBox.empty() && rowH > 0) {
+            int n = Math.min(8, Math.max(1, rowsVisible(rowsBox, rowH)));
+            checkRowBlocks("搬运工名册", rowsBox.y(), rowH, 3, LINE_H, n);
+        }
+        if (infoBox != null && !infoBox.empty() && tab == 0 && "物品".equals(subName())) {
+            int head = infoCapRight == null || infoCapRight.empty() ? LINE_H + 4 : 1;
+            int n = Math.min(8, Math.max(1, infoRows()));
+            checkRowBlocks("物品清单", infoBox.y() + head, LINE_H, 1, LINE_H, n);
+        }
+    }
+
+    /**
+     * 行块自检：第 0 行 y = {@code firstRowY}、行高 {@code rowH}、每行文字从 {@code textTop} 起，
+     * 文字块高 {@code blockH}。任一行「块底 &gt; 下一行行首（+同样的 textTop）」就报一条警告。
+     *
+     * <p>这条断言正是 BUG4 的照妖镜：修之前 {@code regionRowH = 28}、第 0 行文字块 33 高，
+     * 块底 35 &gt; 下一行行首 30 —— 日志里立刻能看到；修完是 35 &lt;= 41，一行都不输出。
+     */
+    private void checkRowBlocks(String name, int firstRowY, int rowH, int textTop, int blockH, int count) {
+        if (rowH <= 0 || blockH <= 0) {
+            return;
+        }
+        int bottom = firstRowY + (count - 1) * rowH + textTop + blockH;
+        int nextTop = firstRowY + Math.max(1, count) * rowH + textTop;
+        if (bottom > nextTop) {
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] 行块自检：{} 文字块底部 {} > 下一行行首 {}"
+                            + "（行高 {}，文字块 {}，行数 {}，界面 {}x{}，页签 {}）",
+                    name, bottom, nextTop, rowH, blockH, count, this.width, this.height, tab);
+        }
+    }
+
+    /** 「仓库」列表的行块自检：第 0 行（合成的「全部仓库」，meta 恒 2 行）与每个真实仓库各一块 */
+    private void checkRegionRows() {
+        if (listBox == null || listBox.empty() || regionRowH <= 0) {
+            return;
+        }
+        List<RegionCache.Entry> list = RegionCache.list();
+        int metaW = Math.max(0, listBox.w() - 4 - 12);
+        int total = list.size() + 1;
+        int visible = Math.max(1, rowsVisible(listBox, regionRowH));
+        int rows = Math.min(total, visible);
+        int worst = 0;
+        for (int idx = 0; idx < rows; idx++) {
+            List<String> meta = idx == 0 ? allRegionsMeta(list.size()) : metaLines(list.get(idx - 1), metaW);
+            worst = Math.max(worst, LINE_H * (1 + meta.size()));
+        }
+        checkRowBlocks("仓库列表", listBox.y() + 2, regionRowH, 2, worst, Math.max(1, rows));
     }
 
     // ================================================================== 建控件
@@ -1337,7 +1479,14 @@ public class WarehouseScreen extends Screen {
             int catW = Math.min(150, Math.max(76, itemCtlRow.w() * 46 / 100));
             catDd = catDd == null ? new Dropdown() : catDd;
             catDd.prefix = "分类：";
+            // 0.23.0：分类下拉沿用了「仓库下拉默认选第 1 个仓库」的初值（Dropdown.choice = 1），
+            // 于是默认就选中第一个页签（如「建筑方块」）并把物品页筛成「共 0 种」。
+            // 这一列的第 0 项才是「全部分类」；玩家手动点过（touched）就尊重他的选择。
+            if (!catDd.touched) {
+                catDd.choice = 0;
+            }
             catDd.entries = catList();
+            catDd.labels = catLabels();
             catDd.clamp();
             catDd.btnRect = new R(itemCtlRow.x(), itemCtlRow.y(), catW, itemCtlRow.h());
             catDd.button = btn(catDd.label(), catDd.btnRect, b -> catDd.toggle());
@@ -1624,10 +1773,17 @@ public class WarehouseScreen extends Screen {
     private void initPorterRoster() {
         List<ClientSnapshot.Bot> bots = ClientSnapshot.bots();
         int visible = rowsVisible(rowsBox, rowH);
-        for (int idx = 0; idx < Math.min(bots.size(), visible); idx++) {
+        // 0.23.0：名册能滚了，控件必须跟着 rowScroll 走，否则滚下去以后按钮还留在原处；
+        // 先登记 rowsBox 的滚动条，rowRect 才知道这一页要不要让出右缘
+        int first = 0;
+        if (rowsBox != null && !rowsBox.empty() && rowH > 0) {
+            armRowsBar(bots.size());
+            first = rowScroll;
+        }
+        for (int idx = 0; idx < Math.min(bots.size() - first, visible); idx++) {
             R row = rowRect(rowsBox, idx, rowH);
             R[] b = botButtons(row);
-            ClientSnapshot.Bot bot = bots.get(idx);
+            ClientSnapshot.Bot bot = bots.get(first + idx);
             // name = 注册名（指令里必须用它，那是身份）；shown = 给人看的名字（优化7 的自定义显示名）
             String name = bot.name;
             String shown = bot.shown();
@@ -1644,7 +1800,46 @@ public class WarehouseScreen extends Screen {
                     () -> run("warehouse bot remove " + q(name), "已删除搬运工「" + shown + "」")));
         }
 
-        // 分配那一行：选择框（点开仓库清单）+ 确定
+        // 分配那一行：显示名输入框 + 设显示名 + 选择框（点开仓库清单）+ 确定
+        if (assignNameRect != null && !assignNameRect.empty() && assignSetRect != null && !assignSetRect.empty()) {
+            // 0.23.0 · 优化7：显示名内置到面板。换人了草稿才清；服务端下发新签名触发的 rebuildWidgets()
+            // 只是重建控件，pickBot 没变 ⇒ 从 assignNameDraft 原样回填，玩家正在敲的字不会丢。
+            if (!pickBot.equals(assignNameOwner)) {
+                assignNameOwner = pickBot;
+                assignNameDraft = "";
+            }
+            assignNameBox = new EditBox(this.font, assignNameRect.x(), assignNameRect.y() + 1,
+                    assignNameRect.w(), Math.max(8, assignNameRect.h() - 2), Component.literal("显示名"));
+            assignNameBox.setMaxLength(32);
+            assignNameBox.setValue(assignNameDraft);
+            rememberHint(assignNameBox, hintFor(assignNameRect.w(), "假人显示名（可中文）", "显示名（可中文）",
+                    "显示名", "昵称", ""));
+            assignNameBox.setResponder(v -> {
+                assignNameDraft = v;
+                assignNameOwner = pickBot;
+            });
+            addRenderableWidget(assignNameBox);
+            btn(pickFit(Math.max(8, assignSetRect.w() - 6), "设显示名", "显示名", "命名"), assignSetRect, b -> {
+                if (pickBot.isEmpty()) {
+                    status = "请先点击上方一行选中搬运工，再设显示名。";
+                    return;
+                }
+                String text = clean(assignNameBox == null ? assignNameDraft : assignNameBox.getValue());
+                if (text.isEmpty()) {
+                    // 空文本 = 清除（nick 是 greedyString，空参数不合法，所以显式发 clear）
+                    assignNameDraft = "";
+                    if (assignNameBox != null) {
+                        assignNameBox.setValue("");
+                    }
+                    run("warehouse bot display " + q(pickBot) + " clear",
+                            "已清除「" + botLabel(pickBot) + "」的显示名（仍显示注册名）");
+                    return;
+                }
+                // nick 是 greedyString：原文照发，**不加引号**（加了引号会连引号一起存进显示名）
+                run("warehouse bot display " + q(pickBot) + " " + text,
+                        "已把「" + pickBot + "」的显示名设为 " + text);
+            });
+        }
         if (assignPick != null && !assignPick.empty()) {
             String label = pickRegion.isEmpty() ? "选择仓库 ▾" : pickRegion + " ▾";
             btn(pickFit(Math.max(8, assignPick.w() - 6), label), assignPick, b -> {
@@ -1721,10 +1916,16 @@ public class WarehouseScreen extends Screen {
         }
         List<ClientSnapshot.Account> accounts = ClientSnapshot.accounts();
         int visible = rowsVisible(rowsBox, rowH);
-        for (int idx = 0; idx < Math.min(accounts.size(), visible); idx++) {
+        // 0.23.0：权限表也能滚了，开关控件同样要跟着 rowScroll 走（并先登记滚动条几何）
+        int first = 0;
+        if (rowsBox != null && !rowsBox.empty() && rowH > 0) {
+            armRowsBar(accounts.size());
+            first = rowScroll;
+        }
+        for (int idx = 0; idx < Math.min(accounts.size() - first, visible); idx++) {
             R row = rowRect(rowsBox, idx, rowH);
             R[] b = permButtons(row);
-            ClientSnapshot.Account acc = accounts.get(idx);
+            ClientSnapshot.Account acc = accounts.get(first + idx);
             String name = acc.name;
             btn(acc.take ? "取货 开" : "取货 关", b[0], x ->
                     run("warehouse user perm " + q(name) + " take " + (acc.take ? "off" : "on"),
@@ -1753,6 +1954,8 @@ public class WarehouseScreen extends Screen {
         /** 清单里能画几行 */
         private int rows;
         private int scroll;
+        /** 0.23.0：清单右缘的可拖动滚动条（轨道几何由 {@link #draw} 每帧登记） */
+        private final ScrollBar sb = new ScrollBar();
         private Button button;
         private boolean open;
         /** 0 = 全部仓库；k = RegionCache 里第 k 个仓库 */
@@ -1762,8 +1965,14 @@ public class WarehouseScreen extends Screen {
         /**
          * 非 null = 通用条目列表（「物品」页的分类下拉用），下标 0 就是它列表里的第一条；
          * null = 仓库列表（条目动态来自 {@link RegionCache}）。
+         *
+         * <p>0.23.0 · BUG2：{@code entries} 现在只是**键**列 —— 写进指令、比较、去重全用它，语义没变；
+         * 显示改用与它下标一一对应的 {@link #labels}（分类键 → 「建筑材料」这种中文名）。
+         * 两列下标同源，所以「两个页签显示名一样」也不会串：永远按下标取键，从不拿显示名反查。
          */
         private List<String> entries;
+        /** 与 {@link #entries} 一一对应的显示列（null = 没有独立显示名，键本身就是显示名） */
+        private List<String> labels;
         /** 按钮文字前缀：「仓库：」/「分类：」 */
         private String prefix = "仓库：";
         /** 选中回调（通用条目用；仓库下拉为 null） */
@@ -1774,8 +1983,8 @@ public class WarehouseScreen extends Screen {
             return entries != null ? entries.size() : 1 + RegionCache.list().size();
         }
 
-        /** 第 i 条候选的名字 */
-        private String entryName(int i) {
+        /** 第 i 条候选回传给指令的**键**（分类下拉 = category 键；仓库下拉 = 仓库名） */
+        private String entryKey(int i) {
             if (entries != null) {
                 return i >= 0 && i < entries.size() ? entries.get(i) : "";
             }
@@ -1785,6 +1994,14 @@ public class WarehouseScreen extends Screen {
             List<RegionCache.Entry> regions = RegionCache.list();
             int k = i - 1;
             return k < regions.size() ? regions.get(k).name : "";
+        }
+
+        /** 第 i 条候选的**显示名**：有独立显示列就用它（分类下拉），否则显示名就是键 */
+        private String entryLabel(int i) {
+            if (labels != null) {
+                return i >= 0 && i < labels.size() ? labels.get(i) : "";
+            }
+            return entryKey(i);
         }
 
         /** 候选列表变了（新增 / 删除仓库、分类增减）之后把选中项收回合法范围 */
@@ -1803,11 +2020,25 @@ public class WarehouseScreen extends Screen {
         /** 按钮上的字：当前范围 + 展开方向（画与点共用，改文案只改这一处） */
         private String label() {
             clamp();
-            String name = entryName(choice);
+            String name = entryLabel(choice);
             if (name == null || name.isEmpty()) {
                 name = "无";
             }
             return prefix + name + (open ? " ▴" : " ▾");
+        }
+
+        /**
+         * 把按钮上的字改掉：原版按钮不会裁剪标签，所以这里跟 {@link #btn} 用同一个口径
+         * （放不下就先缩成带「…」的短句）。0.23.0 · BUG2 顺带修：以前这里直接塞原文，
+         * 中文分类名/长键会把字画到按钮外面。
+         */
+        private void refreshButton() {
+            if (button == null) {
+                return;
+            }
+            int room = Math.max(8, (btnRect == null ? 96 : btnRect.w()) - 6);
+            String text = label();
+            button.setMessage(Component.literal(pickFit(room, text, fit(text, room))));
         }
 
         /** 收起下拉并把按钮上的字改回来（{@code init()} 里也会调一次，保证换页后不留展开态） */
@@ -1815,17 +2046,19 @@ public class WarehouseScreen extends Screen {
             open = false;
             list = null;
             rows = 0;
-            if (button != null) {
-                button.setMessage(Component.literal(label()));
-            }
+            sb.release();
+            refreshButton();
+        }
+
+        /** 0.23.0：松手时结束滚动条拖动（由 {@link WarehouseScreen#releaseScrollBars()} 调） */
+        private void releaseDrag() {
+            sb.release();
         }
 
         private void toggle() {
             open = !open;
             scroll = 0;
-            if (button != null) {
-                button.setMessage(Component.literal(label()));
-            }
+            refreshButton();
             if (open) {
                 layout();
             } else {
@@ -1862,6 +2095,13 @@ public class WarehouseScreen extends Screen {
                 return;
             }
             int w = Math.max(btnRect.w(), 96);
+            // 0.23.0 · BUG2：中文显示名比键长，清单按**最长显示名**撑宽（再夹在面板里，绝不越界）
+            int needW = 0;
+            for (int i = 0; i < n; i++) {
+                needW = Math.max(needW, WarehouseScreen.this.font.width(entryLabel(i)));
+            }
+            w = Math.max(w, needW + 16);
+            w = Math.min(w, Math.max(96, panel.w() - GAP * 2));
             int x = Math.min(btnRect.x(), panel.right() - GAP - w);
             x = Math.max(panel.x(), x);
             list = down ? new R(x, btnRect.bottom() + 2, w, h) : new R(x, btnRect.y() - 2 - h, w, h);
@@ -1907,6 +2147,10 @@ public class WarehouseScreen extends Screen {
          * @return true = 这次点击已经处理掉了；false = 点在按钮本身上（交给原版按钮去 toggle）
          */
         private boolean click(double mx, double my) {
+            if (sb.click(mx, my)) {
+                // 0.23.0：点清单右缘的滚动条优先于点条目（否则会被当成点了某一行）
+                return true;
+            }
             if (btnRect != null && btnRect.holds(mx, my)) {
                 return false;
             }
@@ -1927,8 +2171,20 @@ public class WarehouseScreen extends Screen {
             if (list == null || list.empty() || !list.holds(mx, my)) {
                 return false;
             }
+            // 0.23.0：滚轮向下（dy < 0）= 看后面的条目，跟面板里其它列表、以及原版列表同一个方向
+            int step = -(int) Math.signum(dy);
             int max = Math.max(0, count() - rows);
-            scroll = Math.max(0, Math.min(scroll + (dy > 0 ? 1 : -1), max));
+            scroll = Math.max(0, Math.min(scroll + step, max));
+            return true;
+        }
+
+        /** 0.23.0：拖动清单右缘的滚动条 —— 返回 true = 这次拖动归滚动条 */
+        private boolean dragTo(double my) {
+            int v = sb.dragged(my);
+            if (v < 0) {
+                return false;
+            }
+            scroll = v;
             return true;
         }
 
@@ -1943,24 +2199,30 @@ public class WarehouseScreen extends Screen {
             final int first = scroll;
             final int vis = rows;
             final int n = count();
+            // 0.23.0：右缘滚动条 —— 先登记这一帧的几何与滚动状态，再画
+            sb.slot(list);
+            sb.state(first, vis, n);
+            sb.draw(g);
             clipped(g, list, gg -> {
                 for (int i = 0; i < vis; i++) {
                     int idx = first + i;
                     if (idx >= n) {
                         break;
                     }
-                    R line = new R(list.x() + 2, list.y() + 2 + i * lineH, Math.max(0, list.w() - 4), lineH);
+                    R line = new R(list.x() + 2, list.y() + 2 + i * lineH,
+                            Math.max(0, list.w() - 4 - sb.gutter()), lineH);
                     boolean chosen = idx == choice;
                     if (chosen) {
                         fillIn(gg, line, 0xFF1D3350);
                     } else if (line.holds(mouseX, mouseY)) {
                         fillIn(gg, line, 0xFF24313F);
                     }
-                    textCenter(gg, line, (chosen ? "✓ " : "") + entryName(idx),
+                    textCenter(gg, line, (chosen ? "✓ " : "") + entryLabel(idx),
                             chosen ? 0xFFFFFFFF : 0xFFD5DEEA);
                 }
                 if (n > vis) {
-                    textRight(gg, new R(list.x(), list.bottom() - LINE_H - 2, Math.max(0, list.w() - 3), LINE_H),
+                    textRight(gg, new R(list.x(), list.bottom() - LINE_H - 2,
+                                    Math.max(0, list.w() - 3 - sb.gutter()), LINE_H),
                             (first + 1) + "~" + Math.min(n, first + vis) + " / " + n, 0xFF7C8CA1);
                 }
             });
@@ -1973,7 +2235,7 @@ public class WarehouseScreen extends Screen {
             return "全部仓库";
         }
         // 优化10：与 pickItems() 用同一个来源（下拉里选中的那一条），不再绕道 selectedRegion()
-        String region = clean(pickDd.entryName(pickDd.choice));
+        String region = clean(pickDd.entryKey(pickDd.choice));
         return region.isEmpty() ? "未选仓库" : region;
     }
 
@@ -1982,7 +2244,7 @@ public class WarehouseScreen extends Screen {
         if (taskDd == null || taskDd.choice <= 0) {
             return "";
         }
-        return clean(taskDd.entryName(taskDd.choice));
+        return clean(taskDd.entryKey(taskDd.choice));
     }
 
     /** 「整理」页发指令用：选「全部仓库」就不带仓库名（服务端按各假人自己的值守仓库办） */
@@ -2224,7 +2486,7 @@ public class WarehouseScreen extends Screen {
         if (pickDd == null || pickDd.choice > 0) {
             // 优化10：直接取下拉里那一条的名字（不再依赖 selectedRegion() 的隐式同步 ——
             // 「仓库」页选「全部仓库」时 selectedRegion() 是空串，而下拉可以仍然指着某个具体仓库）
-            String name = pickDd == null ? selectedRegion() : pickDd.entryName(pickDd.choice);
+            String name = pickDd == null ? selectedRegion() : pickDd.entryKey(pickDd.choice);
             List<ClientSnapshot.Item> all = itemsOf(name);
             if (q.isEmpty()) {
                 return all;
@@ -2250,6 +2512,8 @@ public class WarehouseScreen extends Screen {
                     row = new ClientSnapshot.Item();
                     row.id = it.id;
                     row.name = it.name;
+                    row.ench = it.ench;
+                    row.customName = it.customName;
                     row.count = 0;
                     row.refs = 0;
                     byKey.put(key, row);
@@ -2275,9 +2539,17 @@ public class WarehouseScreen extends Screen {
         return out;
     }
 
-    /** 合并「全部仓库」视图用的键：优先物品 id，老服务端没给 id 就退回名字 */
+    /**
+     * 合并「全部仓库」视图用的键：优先物品 id，老服务端没给 id 就退回名字。
+     *
+     * <p>0.23.0：附魔/自定义名不同的行**不能并**（否则「附魔书 · 锋利 V」与「附魔书 · 保护 III」
+     * 会被合成一行，取货时也分不清该取哪种）。
+     */
     private static String itemKey(ClientSnapshot.Item it) {
-        return it.id == null || it.id.isEmpty() ? String.valueOf(it.name) : it.id;
+        String base = it.id == null || it.id.isEmpty() ? String.valueOf(it.name) : it.id;
+        String ench = it.ench == null ? "" : it.ench;
+        String custom = it.customName == null ? "" : it.customName;
+        return ench.isEmpty() && custom.isEmpty() ? base : base + '#' + ench + '#' + custom;
     }
 
     /**
@@ -2294,6 +2566,20 @@ public class WarehouseScreen extends Screen {
             return true;
         }
         if (it.name != null && it.name.toLowerCase(Locale.ROOT).contains(q)) {
+            return true;
+        }
+        // 0.23.0：附魔也能当关键词搜 —— 中文译名（「锋利」）、注册名（「sharpness」）都算命中
+        String ench = it.ench == null ? "" : it.ench;
+        if (!ench.isEmpty()) {
+            if (ench.toLowerCase(Locale.ROOT).contains(q)) {
+                return true;
+            }
+            if (enchantList(ench).toLowerCase(Locale.ROOT).contains(q)) {
+                return true;
+            }
+        }
+        String custom = it.customName == null ? "" : it.customName;
+        if (!custom.isEmpty() && custom.toLowerCase(Locale.ROOT).contains(q)) {
             return true;
         }
         String local = ClientNames.item(it.id);
@@ -2482,6 +2768,28 @@ public class WarehouseScreen extends Screen {
     }
 
     /**
+     * 取货行上跟在物品名后面的属性文案：附魔（中文译名，如「锋利 V · 耐久 III」）+ «自定义名»。
+     *
+     * <p>0.23.0：取货页以前只看得见物品名，附魔书几十本长得一模一样、也搜不出「锋利」；
+     * 现在每行都带上属性，点哪一行就按那一行的附魔精确下单。
+     */
+    private static String itemMetaText(ClientSnapshot.Item it) {
+        StringBuilder sb = new StringBuilder();
+        String ench = it.ench == null ? "" : it.ench;
+        if (!ench.isEmpty()) {
+            sb.append(enchantList(ench));
+        }
+        String custom = it.customName == null ? "" : it.customName;
+        if (!custom.isEmpty()) {
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append('«').append(custom).append('»');
+        }
+        return sb.toString();
+    }
+
+    /**
      * 点一行物品后填进「取货」输入框的文本。
      *
      * <p>填名字的前提是「服务端解析得动这个名字」：服务端按**自己的语言**解析（先当 id 解析，
@@ -2489,11 +2797,17 @@ public class WarehouseScreen extends Screen {
      * 否则填 id —— id 与服务端语言无关，{@code /warehouse order <id>} 一定解析得到。
      */
     private static String orderFill(ClientSnapshot.Item it) {
+        String base;
         String local = ClientNames.item(it.id);
         if (local != null && !local.isEmpty() && local.equals(it.name)) {
-            return it.name;
+            base = it.name;
+        } else {
+            base = it.id == null || it.id.isEmpty() ? it.name : it.id;
         }
-        return it.id == null || it.id.isEmpty() ? it.name : it.id;
+        // 0.23.0：有附魔的行拼上 `#附魔组合`，服务端据此只取对得上的那些（老服务端不认这个后缀，
+        // 但老服务端也不会下发附魔行，所以不会互相踩）
+        String ench = it.ench == null ? "" : it.ench.trim();
+        return ench.isEmpty() ? base : base + '#' + ench;
     }
 
     /** 「取货」：把写的物品与数量变成一条取货指令 */
@@ -2867,9 +3181,72 @@ public class WarehouseScreen extends Screen {
         return box == null || h <= 0 ? 0 : Math.max(0, box.h() / h);
     }
 
-    /** 行区里第 i 行的矩形（i 从 0 开始） */
-    private static R rowRect(R box, int i, int h) {
-        return new R(box.x(), box.y() + i * h, box.w(), h);
+    /** 行区里第 i 行的矩形（i 从 0 开始）；右侧只在真要滚动时让出滚动条的位置 */
+    private R rowRect(R box, int i, int h) {
+        return new R(box.x(), box.y() + i * h, Math.max(0, box.w() - sbRows.gutter()), h);
+    }
+
+    /**
+     * 当前这一页 {@code rowsBox} 里到底有多少行；-1 = 这一页没有 rowsBox 清单。
+     *
+     * <p>0.23.0：搬运工名册、权限用户表、审计日志三份清单共用 rowsBox 这块区域，
+     * 页面里只有一份在画，所以行数按「当前 tab + 子页」取。
+     */
+    private int rowsBoxTotal() {
+        if (rowsBox == null || rowsBox.empty() || rowH <= 0) {
+            return -1;
+        }
+        if (tab == 2 && sub == 0) {
+            return ClientSnapshot.bots().size();
+        }
+        if (tab == 3 && sub == 0) {
+            return ClientSnapshot.accounts().size();
+        }
+        if (tab == 3 && sub == 1) {
+            JsonObject jo = QueryClient.raw(ViewQueryPayload.KIND_AUDIT);
+            return jo == null ? -1 : QueryClient.arr(jo, "entries").size();
+        }
+        return -1;
+    }
+
+    /**
+     * 把 rowsBox 那份清单的滚动位置夹进合法区间，并把滚动条登记 + 画出来。
+     *
+     * @return 本次可见的第一行下标（绘制/命中都要按它加偏移）
+     */
+    private int rowWindow(GuiGraphicsExtractor g, int total) {
+        int visible = Math.max(1, rowsVisible(rowsBox, rowH));
+        rowScroll = Math.max(0, Math.min(rowScroll, Math.max(0, total - visible)));
+        sbRows.slot(rowsBox);
+        sbRows.state(rowScroll, visible, total);
+        sbRows.draw(g);
+        return rowScroll;
+    }
+
+    /**
+     * 登记 rowsBox 那条滚动条但<b>不画</b>（重建控件时用：init 里也要知道「这一页要不要让右缘」）。
+     *
+     * <p>控件（名册/权限表的按钮）是按 rowRect 摆的，而 rowRect 现在要让位给滚动条；
+     * init 与 draw 必须算出同一个让位值，否则画出来的按钮和能点的位置会差 8 像素。
+     */
+    private void armRowsBar(int total) {
+        if (rowsBox == null || rowsBox.empty() || rowH <= 0 || total < 0) {
+            return;
+        }
+        int visible = Math.max(1, rowsVisible(rowsBox, rowH));
+        rowScroll = Math.max(0, Math.min(rowScroll, Math.max(0, total - visible)));
+        sbRows.slot(rowsBox);
+        sbRows.state(rowScroll, visible, total);
+    }
+
+    /** 当前这一帧 infoBox 上生效的滚动条（列表态 = sbInfo，物品详情态 = sbItemDetail） */
+    private ScrollBar infoBar() {
+        return itemDetailKey.isEmpty() ? sbInfo : sbItemDetail;
+    }
+
+    /** 当前这一帧 boxBox 上生效的滚动条（清单态 = sbBoxes，容器详情态 = sbBoxDetail） */
+    private ScrollBar boxBar() {
+        return boxDetailKey.isEmpty() ? sbBoxes : sbBoxDetail;
     }
 
     /** 「这个仓库里有什么」能画几行（页码行占一行；统计数字在标题带里时不占物品框的行） */
@@ -2990,6 +3367,131 @@ public class WarehouseScreen extends Screen {
         }
     }
 
+    // ==================================================== 0.23.0：列表右缘的可拖动滚动条
+
+    /** 轨道宽度（像素） */
+    private static final int SB_W = 4;
+    /** 列表要给它让出的右缘宽度（给右对齐的「×N」「used/size」腾地方，免得压在一起） */
+    private static final int SB_GUTTER = SB_W + 4;
+
+    /**
+     * 一条自绘的竖直滚动条：轨道几何与 (first, visible, total) 都由列表**每次绘制时**登记，
+     * 于是点/拖用的位置跟玩家看到的那一帧完全一致（不用在输入处理里把布局再算一遍）。
+     *
+     * <p>没内容可滚（{@code total <= visible}）时 {@link #shown()} 为 false：不画，也不吃点击。
+     * 滚轮方向与 {@link WarehouseScreen#mouseScrolled} 同一口径：向下 = 看后面的内容。
+     */
+    private static final class ScrollBar {
+        private int x;
+        private int y;
+        private int h;
+        private int first;
+        private int visible;
+        private int total;
+        private boolean drag;
+        private double grab;
+        /** 0.23.0：按下时刻。26.2 里同一次按下的后续事件可能被别的分支清掉拖动状态，用它重新接上 */
+        private long armedAt;
+
+        /** 列表绘制时登记轨道：贴在这个矩形的右缘内侧 */
+        void slot(R box) {
+            if (box == null || box.empty()) {
+                h = 0;
+                return;
+            }
+            x = box.right() - SB_W - 3;
+            y = box.y() + 3;
+            h = box.h() - 6;
+        }
+
+        /** 登记这一帧的滚动状态（点/拖时换算用上一帧的值，几何稳定） */
+        void state(int first, int visible, int total) {
+            this.first = first;
+            this.visible = visible;
+            this.total = total;
+        }
+
+        /** 清掉几何与拖动状态（换页 / 换列表时用，避免点到上一页留下的位置） */
+        void reset() {
+            h = 0;
+            drag = false;
+            grab = 0;
+            armedAt = 0L;
+        }
+
+        private boolean shown() {
+            return h > 8 && total > 0 && total > Math.max(0, visible);
+        }
+
+        /**
+         * 这一帧要从内容里让出的右缘宽度：<b>只有真要滚动时才让</b>。
+         *
+         * <p>不滚的列表（条目全放得下）把让位还给内容，否则右缘会白留一条 8 像素的空槽，
+         * 文字/按钮都白缩了一截。
+         */
+        int gutter() {
+            return shown() ? SB_GUTTER : 0;
+        }
+
+        private int thumbH() {
+            int t = (int) Math.round(h * (double) Math.max(0, visible) / Math.max(1, total));
+            return Math.max(10, Math.min(h, t));
+        }
+
+        private int thumbY() {
+            int span = Math.max(0, h - thumbH());
+            int maxFirst = Math.max(1, total - Math.max(0, visible));
+            int f = Math.max(0, Math.min(first, maxFirst));
+            return y + (int) Math.round(span * (double) f / maxFirst);
+        }
+
+        /** 画轨道 + 滑块（没内容可滚就什么都不画） */
+        void draw(GuiGraphicsExtractor g) {
+            if (!shown()) {
+                return;
+            }
+            g.fill(x, y, x + SB_W, y + h, 0x40000000);
+            int ty = thumbY();
+            g.fill(x, ty, x + SB_W, ty + thumbH(), drag ? 0xFF9FC4F0 : 0xFF5B6B84);
+        }
+
+        /** 点轨道：返回 true = 这次点击归滚动条管（并开始拖动） */
+        boolean click(double mx, double my) {
+            if (!shown() || mx < x - 3 || mx > x + SB_W + 3 || my < y - 2 || my > y + h + 2) {
+                return false;
+            }
+            int ty = thumbY();
+            int th = thumbH();
+            // 点在滑块上就按「抓住」处理，点在轨道空白处就让滑块跳过来居中
+            grab = (my >= ty && my <= ty + th) ? my - ty : th / 2.0;
+            drag = true;
+            armedAt = System.currentTimeMillis();
+            return true;
+        }
+
+        /** 拖动中：返回新的 first（-1 = 没在拖） */
+        int dragged(double my) {
+            if (!drag) {
+                // 按下之后的拖动事件如果来晚了（中间被别的分支清过状态），2 秒内重新接上：
+                // 「按得下、拖不动」在 26.2 上表现为状态被清，而不是事件不来。
+                if (armedAt == 0L || System.currentTimeMillis() - armedAt > 2000L) {
+                    return -1;
+                }
+                drag = true;
+            }
+            int span = Math.max(1, h - thumbH());
+            double rel = (my - grab - y) / (double) span;
+            int maxFirst = Math.max(0, total - Math.max(0, visible));
+            return (int) Math.round(Math.max(0.0, Math.min(1.0, rel)) * maxFirst);
+        }
+
+        void release() {
+            drag = false;
+            grab = 0;
+            armedAt = 0L;
+        }
+    }
+
     /**
      * 默认对齐：文字在**自己所属的矩形里水平 + 垂直居中**（不是相对整个 Screen 居中）。
      * <p>
@@ -3067,8 +3569,27 @@ public class WarehouseScreen extends Screen {
         }
     }
 
+    /**
+     * 0.23.0：每帧绘制开头先把 9 条滚动条的几何清掉（只清几何，<b>不动</b>拖动状态）。
+     *
+     * <p>各列表在自己 draw 时重新登记（{@code slot} + {@code state}），所以「这一帧没画的列表」
+     * 的滚动条永远 {@code h == 0} ⇒ {@code click()} 命中不了。否则上一页留下的几何会继续留在字段里，
+     * 跑到别的页面接着吃右缘的点击（按钮、行、开关都会点不动）。
+     */
+    private void clearScrollGeometry() {
+        sbRegions.slot(null);
+        sbInfo.slot(null);
+        sbItemDetail.slot(null);
+        sbBoxes.slot(null);
+        sbBoxDetail.slot(null);
+        sbPick.slot(null);
+        sbAssign.slot(null);
+        sbRows.slot(null);
+    }
+
     @Override
     public void extractBackground(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
+        clearScrollGeometry();
         g.fill(0, 0, this.width, this.height, 0x8A000000);
         fillIn(g, panel, 0xF0141A24);
         borderIn(g, panel, 0xFF3D4757);
@@ -3193,6 +3714,10 @@ public class WarehouseScreen extends Screen {
             int total = list.size() + 1;
             int max = Math.max(0, total - rows);
             scroll = Math.max(0, Math.min(scroll, max));
+            // 0.23.0：仓库列表右缘的滚动条（行内文字都是居中的，不用给它让宽度）
+            sbRegions.slot(listBox);
+            sbRegions.state(scroll, rows, total);
+            sbRegions.draw(g);
             clipped(g, listBox, gg -> {
                 for (int i = 0; i < rows; i++) {
                     int idx = scroll + i;
@@ -3201,7 +3726,8 @@ public class WarehouseScreen extends Screen {
                     }
                     boolean all = idx == 0;
                     RegionCache.Entry entry = all ? null : list.get(idx - 1);
-                    R row = new R(listBox.x() + 2, listBox.y() + 2 + i * regionRowH, Math.max(0, listBox.w() - 4),
+                    R row = new R(listBox.x() + 2, listBox.y() + 2 + i * regionRowH,
+                            Math.max(0, listBox.w() - 4 - sbRegions.gutter()),
                             regionRowH - 2);
                     boolean selected = all ? sel < 0 : idx - 1 == sel;
                     boolean hover = row.holds(mouseX, mouseY);
@@ -3223,7 +3749,8 @@ public class WarehouseScreen extends Screen {
                     }
                 }
                 if (list.isEmpty()) {
-                    R row = new R(listBox.x() + 6, listBox.y() + 6, Math.max(0, listBox.w() - 12), LINE_H);
+                    R row = new R(listBox.x() + 6, listBox.y() + 6,
+                            Math.max(0, listBox.w() - 12 - sbRegions.gutter()), LINE_H);
                     textIn(gg, row, "还没有仓库", 0xFF93A3B8);
                     if (listBox.h() >= 56) {
                         textIn(gg, row.shift(0, 14), "站到一角 → 点1", 0xFF7F8EA3);
@@ -3255,10 +3782,15 @@ public class WarehouseScreen extends Screen {
         return clean(selectedRegion());
     }
 
-    /** 分类下拉的候选：第 0 项固定「全部分类」，其余来自总览的 categories（总览没到就只有第 0 项） */
+    /**
+     * 分类下拉的候选**键**列：第 0 项固定是空串（「不筛」哨兵，**不翻译**），其余来自总览的 categories。
+     *
+     * <p>0.23.0 · BUG2：这里以前直接塞「全部分类」+ 键，界面就照键画出了 {@code minecraft:building_blocks}。
+     * 现在这一列只做键（回传 / 去重 / 比较），显示交给 {@link #catLabels()} 同下标的显示列。
+     */
     private List<String> catList() {
         List<String> out = new ArrayList<>();
-        out.add("全部分类");
+        out.add("");
         for (JsonObject c : QueryClient.arr(QueryClient.raw(ViewQueryPayload.KIND_OVERVIEW), "categories")) {
             String name = QueryClient.str(c, "name");
             if (!name.isEmpty() && !out.contains(name)) {
@@ -3268,13 +3800,26 @@ public class WarehouseScreen extends Screen {
         return out;
     }
 
-    /** 分类下拉选中的分类（「全部分类」= 空串，交给服务端当「不筛」） */
+    /** 分类下拉的显示列：与 {@link #catList()} 一一对应；哨兵 → 「全部分类」，其余 → 中文分类名 */
+    private List<String> catLabels() {
+        List<String> out = new ArrayList<>();
+        for (String key : catList()) {
+            out.add(key.isEmpty() ? "全部分类" : Categories.displayName(key));
+        }
+        return out;
+    }
+
+    /** 分类键 → 中文显示名（空串原样返回，方便各处直接拼「 · 」）；取不到时 {@link Categories} 会回落成键 */
+    private static String catLabel(String key) {
+        return key == null || key.isEmpty() ? "" : Categories.displayName(key);
+    }
+
+    /** 分类下拉选中的分类**键**（第 0 项 = 空串，交给服务端当「不筛」；显示的「全部分类」绝不参与回传） */
     private String catKey() {
         if (catDd == null || catDd.choice <= 0) {
             return "";
         }
-        String name = catDd.entryName(catDd.choice);
-        return "全部分类".equals(name) ? "" : name;
+        return catDd.entryKey(catDd.choice);
     }
 
     /** 排序参数（服务端口径见 ViewQueryService.sort） */
@@ -3374,6 +3919,7 @@ public class WarehouseScreen extends Screen {
         if (!detail && catDd != null) {
             // 每帧刷一次候选：总览数据到了以后分类才会出现在下拉里
             catDd.entries = catList();
+            catDd.labels = catLabels();
             catDd.clamp();
         }
         JsonObject jo = QueryClient.raw(detail ? ViewQueryPayload.KIND_ITEM : ViewQueryPayload.KIND_ITEMS);
@@ -3397,13 +3943,13 @@ public class WarehouseScreen extends Screen {
         borderIn(g, infoBox, 0xFF2A3342);
         if (jo == null) {
             clipped(g, infoBox, gg -> drawHintLines(gg, infoBox.x() + 6, infoBox.y() + 3,
-                    Math.max(0, infoBox.w() - 12), List.of("正在查询…"), 0xFF93A3B8));
+                    Math.max(0, infoBox.w() - 12 - infoBar().gutter()), List.of("正在查询…"), 0xFF93A3B8));
             return;
         }
         String error = QueryClient.str(jo, "error");
         if (!error.isEmpty()) {
             clipped(g, infoBox, gg -> drawHintLines(gg, infoBox.x() + 6, infoBox.y() + 3,
-                    Math.max(0, infoBox.w() - 12), List.of(error), 0xFFE0B36A));
+                    Math.max(0, infoBox.w() - 12 - infoBar().gutter()), List.of(error), 0xFFE0B36A));
             return;
         }
         if (detail) {
@@ -3421,7 +3967,7 @@ public class WarehouseScreen extends Screen {
         itemPage = Math.min(Math.max(1, page), pages);
         boolean headInCap = infoCapRight != null && !infoCapRight.empty();
         R headBox = headInCap ? infoCapRight
-                : new R(infoBox.x() + 6, infoBox.y() + 3, Math.max(0, infoBox.w() - 12), LINE_H);
+                : new R(infoBox.x() + 6, infoBox.y() + 3, Math.max(0, infoBox.w() - 12 - infoBar().gutter()), LINE_H);
         String stat = "共 " + total + " 种 · 第 " + itemPage + "/" + pages + " 页";
         textCenter(g, headBox, fitChecked(stat, headBox.w(), headBox), 0xFFB9C8DA);
         int top = headInCap ? infoBox.y() + 1 : infoBox.y() + 15;
@@ -3429,6 +3975,11 @@ public class WarehouseScreen extends Screen {
         int rows = infoRows();
         int max = Math.max(0, rowsAll.size() - rows);
         infoScroll = Math.max(0, Math.min(infoScroll, max));
+        // 0.23.0：同一块 infoBox 一帧只画一种清单，先把另一种的滚动条登记清掉
+        sbItemDetail.reset();
+        sbInfo.slot(infoBox);
+        sbInfo.state(infoScroll, rows, rowsAll.size());
+        sbInfo.draw(g);
         String[] hoverInfo = {""};
         clipped(g, infoBox, gg -> {
             if (rowsAll.isEmpty()) {
@@ -3436,7 +3987,7 @@ public class WarehouseScreen extends Screen {
                         : (searchText.trim().isEmpty() && catKey().isEmpty()
                                 ? (queryRegion().isEmpty() ? "所有仓库里都没有物品。" : "仓库内暂无物品。")
                                 : "没有符合条件的物品。");
-                drawHintLines(gg, infoBox.x() + 6, top + 2, Math.max(0, infoBox.w() - 12),
+                drawHintLines(gg, infoBox.x() + 6, top + 2, Math.max(0, infoBox.w() - 12 - infoBar().gutter()),
                         List.of(msg), 0xFF93A3B8);
                 return;
             }
@@ -3453,17 +4004,21 @@ public class WarehouseScreen extends Screen {
                     fillIn(gg, line, 0xFF1A2331);
                 }
                 String name = queryItemName(row);
-                String cat = QueryClient.str(row, "category");
-                textIn(gg, new R(line.x() + 2, line.y() + 1, Math.max(0, line.w() - countW - 6), LINE_H),
-                        name + (cat.isEmpty() ? "" : " · " + cat), over ? 0xFFFFFFFF : 0xFFD5DEEA);
+                String cat = catLabel(QueryClient.str(row, "category"));
+                // 0.23.0 · 优化11：附魔 / 自定义名跟容器详情共用同一份渲染（空串时什么都不加）
+                String extra = slotMeta(row);
+                textIn(gg, new R(line.x() + 2, line.y() + 1,
+                                Math.max(0, line.w() - countW - 6), LINE_H),
+                        name + (cat.isEmpty() ? "" : " · " + cat) + extra, over ? 0xFFFFFFFF : 0xFFD5DEEA);
                 textRight(gg, new R(line.right() - countW, line.y() + 1, countW, LINE_H),
                         "×" + QueryClient.num(row, "count"), 0xFF8FB7E8);
                 if (over) {
                     String stacks = QueryClient.str(row, "stacks");
-                    hoverInfo[0] = cat.isEmpty() ? stacks : cat + " · " + stacks;
+                    hoverInfo[0] = (cat.isEmpty() ? "" : cat + " · ") + stacks + extra;
                 }
             }
-            R foot = new R(infoBox.x() + 6, infoBox.bottom() - LINE_H - 2, Math.max(0, infoBox.w() - 12), LINE_H);
+            R foot = new R(infoBox.x() + 6, infoBox.bottom() - LINE_H - 2,
+                    Math.max(0, infoBox.w() - 12 - infoBar().gutter()), LINE_H);
             if (rowsAll.size() > rows) {
                 textRight(gg, foot, (infoScroll + 1) + "~" + Math.min(rowsAll.size(), infoScroll + rows)
                         + " / " + rowsAll.size(), 0xFF6E7E93);
@@ -3486,9 +4041,10 @@ public class WarehouseScreen extends Screen {
         List<String> lines = new ArrayList<>();
         if (item != null) {
             String name = queryItemName(item);
-            String cat = QueryClient.str(item, "category");
+            String cat = catLabel(QueryClient.str(item, "category"));
             String stacks = QueryClient.str(item, "stacks");
-            lines.add(name + (cat.isEmpty() ? "" : " · " + cat) + (stacks.isEmpty() ? "" : " · " + stacks));
+            lines.add(name + (cat.isEmpty() ? "" : " · " + cat) + (stacks.isEmpty() ? "" : " · " + stacks)
+                    + slotMeta(item));
             List<JsonObject> locs = QueryClient.arr(item, "locations");
             for (JsonObject l : locs) {
                 String dim = QueryClient.str(l, "dimensionName");
@@ -3506,12 +4062,17 @@ public class WarehouseScreen extends Screen {
         long count = item == null ? 0L : QueryClient.num(item, "count");
         long refs = item == null ? 0L : QueryClient.num(item, "refs");
         R headBox = headInCap ? infoCapRight
-                : new R(infoBox.x() + 6, infoBox.y() + 3, Math.max(0, infoBox.w() - 12), LINE_H);
+                : new R(infoBox.x() + 6, infoBox.y() + 3, Math.max(0, infoBox.w() - 12 - infoBar().gutter()), LINE_H);
         textCenter(g, headBox, fitChecked("共 " + count + " 个 · " + refs + " 处", headBox.w(), headBox), 0xFFB9C8DA);
         int top = headInCap ? infoBox.y() + 1 : infoBox.y() + 15;
         int rows = infoRows();
         int max = Math.max(0, lines.size() - rows);
         itemDetailScroll = Math.max(0, Math.min(itemDetailScroll, max));
+        // 0.23.0：明细态用自己那条滚动条，先把列表态的登记清掉（两者共用 infoBox）
+        sbInfo.reset();
+        sbItemDetail.slot(infoBox);
+        sbItemDetail.state(itemDetailScroll, rows, lines.size());
+        sbItemDetail.draw(g);
         final int first = itemDetailScroll;
         clipped(g, infoBox, gg -> {
             for (int i = 0; i < rows; i++) {
@@ -3524,12 +4085,14 @@ public class WarehouseScreen extends Screen {
                 if (over) {
                     fillIn(gg, line, 0xFF1A2331);
                 }
-                textIn(gg, new R(line.x() + 2, line.y() + 1, Math.max(0, line.w() - 4), LINE_H),
+                textIn(gg, new R(line.x() + 2, line.y() + 1,
+                                Math.max(0, line.w() - 4), LINE_H),
                         fitChecked(lines.get(idx), Math.max(0, line.w() - 4), line),
                         idx == 0 ? 0xFFFFFFFF : 0xFFD5DEEA);
             }
             if (lines.size() > rows) {
-                R foot = new R(infoBox.x() + 6, infoBox.bottom() - LINE_H - 2, Math.max(0, infoBox.w() - 12), LINE_H);
+                R foot = new R(infoBox.x() + 6, infoBox.bottom() - LINE_H - 2,
+                        Math.max(0, infoBox.w() - 12 - infoBar().gutter()), LINE_H);
                 textRight(gg, foot, (first + 1) + "~" + Math.min(lines.size(), first + rows)
                         + " / " + lines.size(), 0xFF6E7E93);
             }
@@ -3540,7 +4103,8 @@ public class WarehouseScreen extends Screen {
     private R itemRowRect(int i) {
         boolean headInCap = infoCapRight != null && !infoCapRight.empty();
         int top = infoBox.y() + (headInCap ? 1 : 15);
-        return new R(infoBox.x() + 4, top + i * LINE_H, Math.max(0, infoBox.w() - 8), LINE_H);
+        return new R(infoBox.x() + 4, top + i * LINE_H,
+                Math.max(0, infoBox.w() - 8 - infoBar().gutter()), LINE_H);
     }
 
     // ---------------------------------------------------------------- 箱子页（kind=4 / kind=5）
@@ -3559,13 +4123,13 @@ public class WarehouseScreen extends Screen {
         borderIn(g, boxBox, 0xFF2A3342);
         if (jo == null) {
             clipped(g, boxBox, gg -> drawHintLines(gg, boxBox.x() + 6, boxBox.y() + 6,
-                    Math.max(0, boxBox.w() - 12), List.of("正在查询…"), 0xFF93A3B8));
+                    Math.max(0, boxBox.w() - 12 - boxBar().gutter()), List.of("正在查询…"), 0xFF93A3B8));
             return;
         }
         String error = QueryClient.str(jo, "error");
         if (!error.isEmpty()) {
             clipped(g, boxBox, gg -> drawHintLines(gg, boxBox.x() + 6, boxBox.y() + 6,
-                    Math.max(0, boxBox.w() - 12), List.of(error), 0xFFE0B36A));
+                    Math.max(0, boxBox.w() - 12 - boxBar().gutter()), List.of(error), 0xFFE0B36A));
             return;
         }
         if (detail) {
@@ -3604,13 +4168,18 @@ public class WarehouseScreen extends Screen {
         int rows = Math.max(1, rowsVisible(boxBox, BOX_ROW_H));
         int max = Math.max(0, boxes.size() - rows);
         boxScroll = Math.max(0, Math.min(boxScroll, max));
+        // 0.23.0：箱子总览右缘的滚动条（先把明细态的登记清掉，两者共用 boxBox）
+        sbBoxDetail.reset();
+        sbBoxes.slot(boxBox);
+        sbBoxes.state(boxScroll, rows, boxes.size());
+        sbBoxes.draw(g);
         String[] hoverTop = {""};
         clipped(g, boxBox, gg -> {
             if (boxes.isEmpty()) {
-                textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 6, Math.max(0, boxBox.w() - 12), LINE_H),
+                textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 6, Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H),
                         boxNonEmptyOnly ? "没有非空的箱子。" : "此仓库暂无箱子数据。", 0xFF93A3B8);
                 if (!boxNonEmptyOnly) {
-                    textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 20, Math.max(0, boxBox.w() - 12), LINE_H),
+                    textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 20, Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H),
                             "请先扫描仓库；若刚升级模组，请确认服务端也是同一版本。", 0xFF7F8EA3);
                 }
                 return;
@@ -3646,6 +4215,8 @@ public class WarehouseScreen extends Screen {
                 } else {
                     second = second + " · 不在任何仓库区域内";
                 }
+                // 0.23.0 · 优化11：容器行如果带了代表物品的附魔 / 自定义名就接在后面（服务端没给就是空串）
+                second = second + slotMeta(box);
                 int secondW = Math.max(0, row.w() - 8);
                 textIn(gg, new R(row.x() + 4, row.y() + 14, secondW, LINE_H),
                         fitChecked(second, secondW, row), hover ? 0xFFD8E6F8 : 0xFF7C8CA1);
@@ -3654,7 +4225,8 @@ public class WarehouseScreen extends Screen {
                 }
             }
         });
-        R foot = new R(boxBox.x() + 6, boxBox.bottom() - LINE_H - 2, Math.max(0, boxBox.w() - 12), LINE_H);
+        R foot = new R(boxBox.x() + 6, boxBox.bottom() - LINE_H - 2,
+                Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H);
         if (boxes.size() > rows) {
             textRight(g, foot, (boxScroll + 1) + "~" + Math.min(boxes.size(), boxScroll + rows)
                     + " / " + boxes.size(), 0xFF6E7E93);
@@ -3681,7 +4253,7 @@ public class WarehouseScreen extends Screen {
                 lines.add("空箱");
             }
             for (JsonObject it : items) {
-                String cat = QueryClient.str(it, "category");
+                String cat = catLabel(QueryClient.str(it, "category"));
                 lines.add("槽 " + QueryClient.num(it, "slot") + " · " + queryItemName(it)
                         + " ×" + QueryClient.num(it, "count") + (cat.isEmpty() ? "" : " · " + cat)
                         + slotMeta(it));
@@ -3708,6 +4280,11 @@ public class WarehouseScreen extends Screen {
         int rows = Math.max(1, rowsVisible(boxBox, LINE_H) - (headInsideBox ? 1 : 0));
         int max = Math.max(0, lines.size() - rows);
         boxDetailScroll = Math.max(0, Math.min(boxDetailScroll, max));
+        // 0.23.0：单箱明细右缘的滚动条（先把总览态的登记清掉，两者共用 boxBox）
+        sbBoxes.reset();
+        sbBoxDetail.slot(boxBox);
+        sbBoxDetail.state(boxDetailScroll, rows, lines.size());
+        sbBoxDetail.draw(g);
         final int first = boxDetailScroll;
         clipped(g, boxBox, gg -> {
             for (int i = 0; i < rows; i++) {
@@ -3716,17 +4293,19 @@ public class WarehouseScreen extends Screen {
                     break;
                 }
                 int y = boxBox.y() + 2 + rowPad + i * LINE_H;
-                R line = new R(boxBox.x() + 4, y, Math.max(0, boxBox.w() - 8), LINE_H);
+                R line = new R(boxBox.x() + 4, y, Math.max(0, boxBox.w() - 8 - boxBar().gutter()), LINE_H);
                 boolean over = line.holds(mouseX, mouseY);
                 if (over) {
                     fillIn(gg, line, 0xFF1A2331);
                 }
-                textIn(gg, new R(line.x() + 2, line.y(), Math.max(0, line.w() - 4), LINE_H),
+                textIn(gg, new R(line.x() + 2, line.y(),
+                                Math.max(0, line.w() - 4), LINE_H),
                         fitChecked(lines.get(idx), Math.max(0, line.w() - 4), line),
                         idx == 0 ? 0xFFFFFFFF : 0xFFD5DEEA);
             }
             if (lines.size() > rows) {
-                R foot = new R(boxBox.x() + 6, boxBox.bottom() - LINE_H - 2, Math.max(0, boxBox.w() - 12), LINE_H);
+                R foot = new R(boxBox.x() + 6, boxBox.bottom() - LINE_H - 2,
+                        Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H);
                 textRight(gg, foot, (first + 1) + "~" + Math.min(lines.size(), first + rows)
                         + " / " + lines.size(), 0xFF6E7E93);
             }
@@ -3735,7 +4314,8 @@ public class WarehouseScreen extends Screen {
 
     /** 箱子行矩形（列表态与点击判定共用同一套几何） */
     private R boxRowRect(int i) {
-        return new R(boxBox.x() + 2, boxBox.y() + 2 + i * BOX_ROW_H, Math.max(0, boxBox.w() - 4), BOX_ROW_H - 2);
+        return new R(boxBox.x() + 2, boxBox.y() + 2 + i * BOX_ROW_H,
+                Math.max(0, boxBox.w() - 4 - boxBar().gutter()), BOX_ROW_H - 2);
     }
 
     /**
@@ -3912,18 +4492,23 @@ public class WarehouseScreen extends Screen {
         int rows = Math.max(1, rowsVisible(boxBox, BOX_ROW_H));
         int max = Math.max(0, boxes.size() - rows);
         boxScroll = Math.max(0, Math.min(boxScroll, max));
+        // 0.23.0：离线快照态的箱子总览右缘滚动条
+        sbBoxDetail.reset();
+        sbBoxes.slot(boxBox);
+        sbBoxes.state(boxScroll, rows, boxes.size());
+        sbBoxes.draw(g);
         String[] hoverTop = {""};
         clipped(g, boxBox, gg -> {
             if (!ClientSnapshot.hasData()) {
-                textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 6, Math.max(0, boxBox.w() - 12), LINE_H),
+                textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 6, Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H),
                         "正在接收服务器仓库数据…", 0xFF93A3B8);
                 return;
             }
             if (boxes.isEmpty()) {
-                textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 6, Math.max(0, boxBox.w() - 12), LINE_H),
+                textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 6, Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H),
                         boxNonEmptyOnly ? "没有非空的箱子。" : "此仓库暂无箱子数据。", 0xFF93A3B8);
                 if (!boxNonEmptyOnly) {
-                    textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 20, Math.max(0, boxBox.w() - 12), LINE_H),
+                    textIn(gg, new R(boxBox.x() + 6, boxBox.y() + 20, Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H),
                             "请先扫描仓库；若刚升级模组，请确认服务端也是同一版本。", 0xFF7F8EA3);
                 }
                 return;
@@ -3935,7 +4520,7 @@ public class WarehouseScreen extends Screen {
                 }
                 ClientSnapshot.Box box = boxes.get(idx);
                 R row = new R(boxBox.x() + 2, boxBox.y() + 2 + i * BOX_ROW_H,
-                        Math.max(0, boxBox.w() - 4), BOX_ROW_H - 2);
+                        Math.max(0, boxBox.w() - 4 - boxBar().gutter()), BOX_ROW_H - 2);
                 boolean hover = row.holds(mouseX, mouseY);
                 if (hover) {
                     fillIn(gg, row, 0xFF1A2331);
@@ -3953,7 +4538,7 @@ public class WarehouseScreen extends Screen {
                 String top = topTextOf(box);
                 // 批次 6 · D3：先报「这箱主要装什么」（服务端按非空槽数→件数挑的分类）
                 String dom = box.dominant == null || box.dominant.isEmpty() ? ""
-                        : "主 " + box.dominant + " " + box.domSlots + "格/" + box.domCount + "件";
+                        : "主 " + catLabel(box.dominant) + " " + box.domSlots + "格/" + box.domCount + "件";
                 String second = box.items <= 0 ? "空箱"
                         : (dom.isEmpty() ? "" : dom + " · ") + box.items + " 个"
                                 + (top.isEmpty() ? "" : " · " + top);
@@ -3967,7 +4552,8 @@ public class WarehouseScreen extends Screen {
                 }
             }
         });
-        R foot = new R(boxBox.x() + 6, boxBox.bottom() - LINE_H - 2, Math.max(0, boxBox.w() - 12), LINE_H);
+        R foot = new R(boxBox.x() + 6, boxBox.bottom() - LINE_H - 2,
+                Math.max(0, boxBox.w() - 12 - boxBar().gutter()), LINE_H);
         if (boxes.size() > rows) {
             textRight(g, foot, (boxScroll + 1) + "~" + Math.min(boxes.size(), boxScroll + rows)
                     + " / " + boxes.size(), 0xFF6E7E93);
@@ -4154,7 +4740,7 @@ public class WarehouseScreen extends Screen {
 
         if (!ClientSnapshot.hasData()) {
             clipped(g, infoBox, gg -> drawHintLines(gg, infoBox.x() + 6, infoBox.y() + 3,
-                    Math.max(0, infoBox.w() - 12), infoHint(region, query, List.of()), 0xFF93A3B8));
+                    Math.max(0, infoBox.w() - 12 - infoBar().gutter()), infoHint(region, query, List.of()), 0xFF93A3B8));
             return;
         }
 
@@ -4165,7 +4751,7 @@ public class WarehouseScreen extends Screen {
         // 注意这一句必须在 clipped(infoBox) 之外 —— 画在 clip 里会被剪掉。
         boolean headInCap = infoCapRight != null && !infoCapRight.empty();
         R headBox = headInCap ? infoCapRight
-                : new R(infoBox.x() + 6, infoBox.y() + 3, Math.max(0, infoBox.w() - 12), LINE_H);
+                : new R(infoBox.x() + 6, infoBox.y() + 3, Math.max(0, infoBox.w() - 12 - infoBar().gutter()), LINE_H);
         textCenter(g, headBox, infoStat(region, query, items, headBox.w()), 0xFFB9C8DA);
         final int top = headInCap ? infoBox.y() + 1 : infoBox.y() + 15;
 
@@ -4174,6 +4760,11 @@ public class WarehouseScreen extends Screen {
             int rows = infoRows();
             int max = Math.max(0, items.size() - rows);
             infoScroll = Math.max(0, Math.min(infoScroll, max));
+            // 0.23.0：离线快照态的物品列表右缘滚动条（先把明细态的登记清掉）
+            sbItemDetail.reset();
+            sbInfo.slot(infoBox);
+            sbInfo.state(infoScroll, rows, items.size());
+            sbInfo.draw(g);
             int countW = 46;
             for (int i = 0; i < rows; i++) {
                 int idx = infoScroll + i;
@@ -4182,19 +4773,22 @@ public class WarehouseScreen extends Screen {
                 }
                 ClientSnapshot.Item row = items.get(idx);
                 int y = top + i * LINE_H;
-                R line = new R(infoBox.x() + 4, y, Math.max(0, infoBox.w() - 8), LINE_H);
+                R line = new R(infoBox.x() + 4, y, Math.max(0, infoBox.w() - 8 - infoBar().gutter()), LINE_H);
                 boolean over = line.holds(mouseX, mouseY);
                 if (over) {
                     fillIn(gg, line, 0xFF1A2331);
                 }
-                textIn(gg, new R(line.x() + 2, y + 1, Math.max(0, line.w() - countW - 6), LINE_H),
+                textIn(gg, new R(line.x() + 2, y + 1,
+                                Math.max(0, line.w() - countW - 6), LINE_H),
                         itemName(row), over ? 0xFFFFFFFF : 0xFFD5DEEA);
-                textRight(gg, new R(line.right() - countW, y + 1, countW, LINE_H), "×" + row.count, 0xFF8FB7E8);
+                textRight(gg, new R(line.right() - countW, y + 1, countW, LINE_H),
+                        "×" + row.count, 0xFF8FB7E8);
                 if (over && row.loc != null && !row.loc.isEmpty()) {
                     hoverLoc[0] = row.loc;
                 }
             }
-            R foot = new R(infoBox.x() + 6, infoBox.bottom() - LINE_H - 2, Math.max(0, infoBox.w() - 12), LINE_H);
+            R foot = new R(infoBox.x() + 6, infoBox.bottom() - LINE_H - 2,
+                    Math.max(0, infoBox.w() - 12 - infoBar().gutter()), LINE_H);
             if (items.size() > rows) {
                 textRight(gg, foot, (infoScroll + 1) + "~" + Math.min(items.size(), infoScroll + rows)
                         + " / " + items.size(), 0xFF6E7E93);
@@ -4202,7 +4796,7 @@ public class WarehouseScreen extends Screen {
                 textIn(gg, foot, hoverLoc[0], 0xFFE0B36A);
             } else if (items.isEmpty() && rows > 0) {
                 // 一行物品都没有：整块空白正好用来把话说完整（长提示绝不塞进窄条里切一半）
-                drawHintLines(gg, infoBox.x() + 6, top + 2, Math.max(0, infoBox.w() - 12), hint, 0xFF93A3B8);
+                drawHintLines(gg, infoBox.x() + 6, top + 2, Math.max(0, infoBox.w() - 12 - infoBar().gutter()), hint, 0xFF93A3B8);
             } else if (items.size() > 0 && rows <= 0) {
                 textIn(gg, foot, pickFit(foot.w(), "窗口过小：滚轮翻动，或用指令查看", "窗口过小", "过小"), 0xFFE0B36A);
             }
@@ -4287,6 +4881,10 @@ public class WarehouseScreen extends Screen {
         int rows = pickRows();
         int max = Math.max(0, items.size() - rows);
         pickScroll = Math.max(0, Math.min(pickScroll, max));
+        // 0.23.0：取货页物品清单右缘的滚动条
+        sbPick.slot(pickBox);
+        sbPick.state(pickScroll, rows, items.size());
+        sbPick.draw(g);
 
         int locW = Math.max(0, pickBox.w() - 300);
         boolean withLoc = pickBox.w() >= 320;
@@ -4301,23 +4899,43 @@ public class WarehouseScreen extends Screen {
                             Math.max(0, pickBox.w() - 12 - 90), LINE_H);
                     textIn(gg, headRow, head, 0xFF8FA0B8);
                     int top = pickBox.y() + LINE_H + 4;
+                    // 0.23.0：本页只要有一行带附魔 / 自定义名，整页就按「带属性」的版式排 ——
+                    // 否则带属性的行会把「位于…」那列顶出去，跟其它行不在同一条竖线上（就是你截图里「凸出来」的现象）
+                    int rowW = Math.max(0, pickBox.w() - 4 - sbPick.gutter());
+                    boolean anyMeta = false;
+                    for (int k = 0; k < rows && pickScroll + k < items.size(); k++) {
+                        if (!itemMetaText(items.get(pickScroll + k)).isEmpty()) {
+                            anyMeta = true;
+                            break;
+                        }
+                    }
                     for (int i = 0; i < rows; i++) {
                         int idx = pickScroll + i;
                         if (idx >= items.size()) {
                             break;
                         }
                         ClientSnapshot.Item it = items.get(idx);
-                        R line = new R(pickBox.x() + 2, top + i * LINE_H, Math.max(0, pickBox.w() - 4), LINE_H);
+                        R line = new R(pickBox.x() + 2, top + i * LINE_H,
+                                Math.max(0, pickBox.w() - 4 - sbPick.gutter()), LINE_H);
                         boolean hover = line.holds(mouseX, mouseY);
                         if (hover) {
                             fillIn(gg, line, 0xFF1A2331);
                         }
                         int countW = 52;
-                        int nameW = Math.max(40, line.w() * 46 / 100);
-                        textIn(gg, new R(line.x() + 4, line.y(), nameW, LINE_H), itemName(it),
+                        // 0.23.0：版式按整页统一（anyMeta）：列宽只有一套，所以「位于…」永远在同一条竖线上；
+                        // 带属性的行把属性跟在名字后面，名字列多分一点宽度
+                        String meta = itemMetaText(it);
+                        int nameW = anyMeta
+                                ? Math.max(40, Math.max(0, rowW - countW - 8) * 62 / 100)
+                                : Math.max(40, rowW * 46 / 100);
+                        int locWRow = anyMeta ? Math.max(0, rowW - nameW - countW - 12) : locW;
+                        String label = meta.isEmpty() ? itemName(it) : itemName(it) + " · " + meta;
+                        textIn(gg, new R(line.x() + 4, line.y(), Math.max(20, nameW - 4), LINE_H),
+                                fitChecked(label, Math.max(20, nameW - 4), line),
                                 hover ? 0xFFFFFFFF : 0xFFD5DEEA);
-                        if (withLoc && locW > 40) {
-                            textIn(gg, new R(line.x() + 8 + nameW, line.y(), locW, LINE_H), it.loc, 0xFF6E7E93);
+                        if (withLoc && locWRow > 40) {
+                            textIn(gg, new R(line.x() + 8 + nameW, line.y(), locWRow, LINE_H),
+                                    fitChecked(it.loc, locWRow, line), 0xFF6E7E93);
                         }
                         textRight(gg, new R(line.right() - countW, line.y(), countW, LINE_H),
                                 "×" + it.count, 0xFF9FB3CC);
@@ -4373,6 +4991,7 @@ public class WarehouseScreen extends Screen {
             return;
         }
         int visible = rowsVisible(rowsBox, rowH);
+        int first = rowWindow(g, bots.size());
         int widestName = 0;
         for (ClientSnapshot.Bot b : bots) {
             widestName = Math.max(widestName, this.font.width(b.shown()) + 2);
@@ -4380,12 +4999,12 @@ public class WarehouseScreen extends Screen {
         final int needName = widestName;
         clipped(g, rowsBox, gg -> {
             // 这一块只是为了拿按钮宽度，和 init 里用的是同一个方法
-            for (int i = 0; i < Math.min(bots.size(), visible); i++) {
+            for (int i = 0; i < Math.min(bots.size() - first, visible); i++) {
                 R row = rowRect(rowsBox, i, rowH);
                 R[] b = botButtons(row);
                 int textW = Math.max(0, b[0].x() - GAP - row.x());
                 R text = new R(row.x(), row.y(), textW, row.h() - 2);
-                ClientSnapshot.Bot bot = bots.get(i);
+                ClientSnapshot.Bot bot = bots.get(first + i);
                 // 选中的那一行给个底色（「确定」是按选中的这行发指令的）
                 if (bot.name.equals(pickBot)) {
                     fillIn(gg, new R(row.x(), row.y(), Math.max(0, row.w()), Math.max(6, row.h() - 2)), 0xFF1D3350);
@@ -4460,6 +5079,10 @@ public class WarehouseScreen extends Screen {
         int lineH = LINE_H + 3;
         final int first = assignScroll;
         final int rows = assignRows;
+        // 0.23.0：展开的仓库清单右缘滚动条
+        sbAssign.slot(assignList);
+        sbAssign.state(first, rows, list.size());
+        sbAssign.draw(g);
         clipped(g, assignList, gg -> {
             for (int i = 0; i < rows; i++) {
                 int idx = first + i;
@@ -4467,21 +5090,24 @@ public class WarehouseScreen extends Screen {
                     break;
                 }
                 String name = list.get(idx).name;
-                R line = new R(assignList.x() + 2, assignList.y() + 2 + i * lineH, Math.max(0, assignList.w() - 4), lineH);
+                R line = new R(assignList.x() + 2, assignList.y() + 2 + i * lineH,
+                        Math.max(0, assignList.w() - 4 - sbAssign.gutter()), lineH);
                 boolean chosen = name.equals(pickRegion);
                 if (chosen) {
                     fillIn(gg, line, 0xFF1D3350);
                 } else if (line.holds(mouseX, mouseY)) {
                     fillIn(gg, line, 0xFF24313F);
                 }
-                textIn(gg, new R(line.x() + 3, line.y() + 2, Math.max(0, line.w() - 6), LINE_H),
+                textIn(gg, new R(line.x() + 3, line.y() + 2,
+                                Math.max(0, line.w() - 6), LINE_H),
                         (chosen ? "✓ " : "") + name, chosen ? 0xFFFFFFFF : 0xFFCFE0F5);
             }
         });
         if (list.size() > rows) {
             // 条目多于可见行时，右下角给个「滚轮」提示（清单可滚动）
             String hint = (first + 1) + "~" + Math.min(list.size(), first + rows) + " / " + list.size();
-            textRight(g, new R(assignList.x(), assignList.bottom() - LINE_H - 2, assignList.w() - 3, LINE_H),
+            textRight(g, new R(assignList.x(), assignList.bottom() - LINE_H - 2,
+                            Math.max(0, assignList.w() - 3 - sbAssign.gutter()), LINE_H),
                     hint, 0xFF6E7E93);
         }
     }
@@ -4506,11 +5132,12 @@ public class WarehouseScreen extends Screen {
                         "还没有玩家有权限。用 /warehouse user perm <玩家名> take|bot|tidy on 添加，或用 /warehouse user migrate 从旧网页账号库导入。", 0xFF93A3B8);
             } else {
                 int visible = rowsVisible(rowsBox, rowH);
+                int first = rowWindow(g, accounts.size());
                 clipped(g, rowsBox, gg -> {
-                    for (int i = 0; i < Math.min(accounts.size(), visible); i++) {
+                    for (int i = 0; i < Math.min(accounts.size() - first, visible); i++) {
                         R row = rowRect(rowsBox, i, rowH);
                         R[] b = permButtons(row);
-                        ClientSnapshot.Account acc = accounts.get(i);
+                        ClientSnapshot.Account acc = accounts.get(first + i);
                         R text = new R(row.x(), row.y(), Math.max(0, b[0].x() - GAP - row.x()), row.h() - 2);
                         if (text.holds(mouseX, mouseY)) {
                             fillIn(gg, text, 0xFF161E2A);
@@ -4572,13 +5199,14 @@ public class WarehouseScreen extends Screen {
                 hintIn(g, "暂无操作记录。");
             } else {
                 int visible = rowsVisible(rowsBox, rowH);
+                int first = rowWindow(g, rows.size());
                 clipped(g, rowsBox, gg -> {
-                    for (int i = 0; i < Math.min(rows.size(), visible); i++) {
+                    for (int i = 0; i < Math.min(rows.size() - first, visible); i++) {
                         R row = rowRect(rowsBox, i, rowH);
                         if (row.holds(mouseX, mouseY)) {
                             fillIn(gg, row, 0xFF161E2A);
                         }
-                        JsonObject e = rows.get(i);
+                        JsonObject e = rows.get(first + i);
                         String detail = QueryClient.str(e, "detail");
                         String head = QueryClient.str(e, "time") + "  "
                                 + QueryClient.str(e, "who") + "：" + QueryClient.str(e, "action");
@@ -4736,20 +5364,6 @@ public class WarehouseScreen extends Screen {
             }
             return true;
         }
-        if (ev.button() == 0 && tab == 3 && sub == 1 && admin) {
-            // 「权限 → 审计」子页：行区/说明区里的点击一律吃掉（翻页按钮也画在这两块里），
-            // 免得落到下面的行或列表上；页签不在这两块里，不会被误吃。
-            boolean inArea = (rowsBox != null && rowsBox.holds(ev.x(), ev.y()))
-                    || (notesBox != null && notesBox.holds(ev.x(), ev.y()));
-            if (inArea) {
-                if (auditPrev != null && auditPrev.holds(ev.x(), ev.y())) {
-                    goAuditPage(auditPage - 1);
-                } else if (auditNext != null && auditNext.holds(ev.x(), ev.y())) {
-                    goAuditPage(auditPage + 1);
-                }
-                return true;
-            }
-        }
         if (ev.button() == 0 && pickDd != null && pickDd.open && pickDd.click(ev.x(), ev.y())) {
             // 「取货」页的仓库下拉展开着：点条目就换范围，点别处就收起来（两种情况都吃掉这次点击）
             return true;
@@ -4766,6 +5380,25 @@ public class WarehouseScreen extends Screen {
                     itemPage = 1;
                     infoScroll = 0;
                     QueryClient.request(itemRequest(1));
+                }
+                return true;
+            }
+        }
+        if (ev.button() == 0 && clickScrollBar(ev.x(), ev.y())) {
+            // 0.23.0：滚动条画在所有内容之上，命中判定也必须排在「行区通吃」的页面分支前面 ——
+            // 否则像「权限→审计」那样「行区里的点击一律吃掉」的分支会先把点击吞掉，滑块永远拖不动。
+            return true;
+        }
+        if (ev.button() == 0 && tab == 3 && sub == 1 && admin) {
+            // 「权限 → 审计」子页：行区/说明区里的点击一律吃掉（翻页按钮也画在这两块里），
+            // 免得落到下面的行或列表上；页签不在这两块里，不会被误吃。
+            boolean inArea = (rowsBox != null && rowsBox.holds(ev.x(), ev.y()))
+                    || (notesBox != null && notesBox.holds(ev.x(), ev.y()));
+            if (inArea) {
+                if (auditPrev != null && auditPrev.holds(ev.x(), ev.y())) {
+                    goAuditPage(auditPage - 1);
+                } else if (auditNext != null && auditNext.holds(ev.x(), ev.y())) {
+                    goAuditPage(auditPage + 1);
                 }
                 return true;
             }
@@ -4808,12 +5441,13 @@ public class WarehouseScreen extends Screen {
             // 点一行的文字部分 = 选中这个搬运工（行里的三个按钮由控件自己处理）
             List<ClientSnapshot.Bot> bots = ClientSnapshot.bots();
             int visible = rowsVisible(rowsBox, rowH);
-            for (int i = 0; i < Math.min(bots.size(), visible); i++) {
+            // 0.23.0：名册可滚动后，命中判定也要按 rowScroll 加偏移
+            for (int i = 0; i < Math.min(bots.size() - rowScroll, visible); i++) {
                 R row = rowRect(rowsBox, i, rowH);
                 R[] bb = botButtons(row);
                 R text = new R(row.x(), row.y(), Math.max(0, bb[0].x() - GAP - row.x()), row.h());
                 if (text.holds(ev.x(), ev.y())) {
-                    ClientSnapshot.Bot bot = bots.get(i);
+                    ClientSnapshot.Bot bot = bots.get(rowScroll + i);
                     pickBot = bot.name;
                     pickRegion = bot.region == null ? "" : bot.region;
                     pickOpen = false;
@@ -4831,7 +5465,8 @@ public class WarehouseScreen extends Screen {
                 if (idx >= total) {
                     break;
                 }
-                R row = new R(listBox.x() + 2, listBox.y() + 2 + i * regionRowH, Math.max(0, listBox.w() - 4),
+                R row = new R(listBox.x() + 2, listBox.y() + 2 + i * regionRowH,
+                        Math.max(0, listBox.w() - 4 - sbRegions.gutter()),
                         regionRowH - 2);
                 if (row.holds(ev.x(), ev.y())) {
                     // 优化10：点第 0 行 = 「全部仓库」（sel = -1），**不碰** RegionBorder —— 边界是逐个仓库的
@@ -4910,7 +5545,8 @@ public class WarehouseScreen extends Screen {
                 if (idx >= items.size()) {
                     break;
                 }
-                R line = new R(pickBox.x() + 2, top + i * LINE_H, Math.max(0, pickBox.w() - 4), LINE_H);
+                R line = new R(pickBox.x() + 2, top + i * LINE_H,
+                        Math.max(0, pickBox.w() - 4 - sbPick.gutter()), LINE_H);
                 if (line.holds(ev.x(), ev.y())) {
                     ClientSnapshot.Item it = items.get(idx);
                     // 填什么由 orderFill 决定：同一语言就填名字（好看），服务端语言不同就填 id（一定解析得到）
@@ -4968,6 +5604,15 @@ public class WarehouseScreen extends Screen {
             }
             return true;
         }
+        int rowTotal = rowsBoxTotal();
+        if (rowTotal >= 0) {
+            // 0.23.0：搬运工名册 / 权限用户表 / 审计日志（共用 rowsBox）以前滚不动，现在也能滚
+            if (rowsBox.holds(x, y)) {
+                int visible = Math.max(1, rowsVisible(rowsBox, rowH));
+                rowScroll = Math.max(0, Math.min(rowScroll + step, Math.max(0, rowTotal - visible)));
+            }
+            return true;
+        }
         if (tab != 0) {
             return true;   // 搬运工 / 权限页没有可滚的列表
         }
@@ -5015,6 +5660,134 @@ public class WarehouseScreen extends Screen {
             return true;
         }
         return super.mouseScrolled(x, y, dx, dy);
+    }
+
+    /**
+     * 0.23.0：列表右缘的滚动条被按下 → 开始拖动。
+     *
+     * <p>判定顺序与 {@link #mouseScrolled} 保持一致：下拉清单（在下拉的 click 里处理）、
+     * 展开中的仓库清单、取货页清单、箱子页、物品页。这样「滚轮能滚的那块」和
+     * 「滚动条能拖的那块」永远是同一个，不会出现两边对不上的情况。
+     */
+    private boolean clickScrollBar(double mx, double my) {
+        if (pending != null) {
+            return false;   // 弹窗时不让点到底下的列表
+        }
+        // 只看几何：这一帧画过的清单都登记过轨道（见 clearScrollGeometry），没画过的 h == 0 自然点不中。
+        // 8 条 bar 的矩形互不重叠，所以谁先谁后都行。
+        return sbRegions.click(mx, my)
+                || sbInfo.click(mx, my)
+                || sbItemDetail.click(mx, my)
+                || sbBoxes.click(mx, my)
+                || sbBoxDetail.click(mx, my)
+                || sbPick.click(mx, my)
+                || sbAssign.click(mx, my)
+                || sbRows.click(mx, my);
+    }
+
+    /** 0.23.0：拖动中 —— 返回 true = 这次拖动归某条滚动条管 */
+    private boolean dragScrollBar(double my) {
+        if (pickDd != null && pickDd.open && pickDd.dragTo(my)) {
+            return true;
+        }
+        if (taskDd != null && taskDd.open && taskDd.dragTo(my)) {
+            return true;
+        }
+        if (catDd != null && catDd.open && catDd.dragTo(my)) {
+            return true;
+        }
+        // 只看几何：谁在这一帧被按下了（drag == true）就归谁；没被按下的拖不动，
+        // 所以这里不需要再按页分派（按页分派会漏掉「仓库列表在箱子页/取货页」这类组合）。
+        int v;
+        if ((v = sbRegions.dragged(my)) >= 0) {
+            scroll = v;
+            return true;
+        }
+        if ((v = sbInfo.dragged(my)) >= 0) {
+            infoScroll = v;
+            return true;
+        }
+        if ((v = sbItemDetail.dragged(my)) >= 0) {
+            itemDetailScroll = v;
+            return true;
+        }
+        if ((v = sbBoxes.dragged(my)) >= 0) {
+            boxScroll = v;
+            return true;
+        }
+        if ((v = sbBoxDetail.dragged(my)) >= 0) {
+            boxDetailScroll = v;
+            return true;
+        }
+        if ((v = sbPick.dragged(my)) >= 0) {
+            pickScroll = v;
+            return true;
+        }
+        if ((v = sbAssign.dragged(my)) >= 0) {
+            assignScroll = v;
+            return true;
+        }
+        if ((v = sbRows.dragged(my)) >= 0) {
+            rowScroll = v;
+            return true;
+        }
+        return false;
+    }
+
+    /** 0.23.0：松手 → 结束所有滚动条拖动 */
+    private void releaseScrollBars() {
+        if (pickDd != null) {
+            pickDd.releaseDrag();
+        }
+        if (taskDd != null) {
+            taskDd.releaseDrag();
+        }
+        if (catDd != null) {
+            catDd.releaseDrag();
+        }
+        sbRegions.release();
+        sbInfo.release();
+        sbItemDetail.release();
+        sbBoxes.release();
+        sbBoxDetail.release();
+        sbPick.release();
+        sbAssign.release();
+    }
+
+    @Override
+    public boolean mouseDragged(MouseButtonEvent ev, double dragX, double dragY) {
+        if (ev.button() == 0 && dragScrollBar(ev.y())) {
+            return true;
+        }
+        return super.mouseDragged(ev, dragX, dragY);
+    }
+
+    /**
+     * 0.23.0：MC 26.2 里「按住鼠标拖动」这条线不一定派发到 {@link net.minecraft.client.gui.screens.Screen}
+     * （实测按住滑块拖动没有任何反应，而同一次按下之后的滚轮却是好的），所以这里把「按下后移动指针」
+     * 也接上：按下时 {@code ScrollBar.click} 会把 drag 置位，之后每一次鼠标移动都按同一套几何更新位置，
+     * 松手时由 {@link #mouseReleased} 清掉。两条路并存，哪条通都能拖。
+     */
+    @Override
+    public void mouseMoved(double x, double y) {
+        // 正在拖就继续拖（26.2 上 mouseDragged 与 mouseMoved 哪条先到不一定）；
+        // 两条都不认领且左键也没按着时，才清掉拖动状态，避免滑块「黏」在鼠标上
+        if (!dragScrollBar(y) && !leftDown()) {
+            releaseScrollBars();
+        }
+        super.mouseMoved(x, y);
+    }
+
+    /** 左键现在还按着吗（用于判断滚动条拖动是否该继续） */
+    private static boolean leftDown() {
+        Minecraft mc = Minecraft.getInstance();
+        return mc != null && mc.mouseHandler != null && mc.mouseHandler.isLeftPressed();
+    }
+
+    @Override
+    public boolean mouseReleased(MouseButtonEvent ev) {
+        releaseScrollBars();
+        return super.mouseReleased(ev);
     }
 
     @Override

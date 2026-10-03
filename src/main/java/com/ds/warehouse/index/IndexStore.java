@@ -8,11 +8,19 @@ import com.ds.warehouse.util.Categories;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.Registry;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 
 import java.io.Reader;
 import java.io.Writer;
@@ -41,7 +49,9 @@ import java.util.Set;
  * 只保存索引真正用到的信息（物品 id + 数量 + 附魔 / 自定义名索引），不序列化 ItemStack：
  *   - ItemStack 的组件 / NBT 用 Gson 直接序列化既脆弱又没必要；
  *   - 按物品 id 聚合的 items 汇总仍然不区分附魔（口径没变），但「哪个箱子有哪本附魔书 /
- *     哪个箱子里有改过名的物品」另存两张小表（format 2 起：enchants / customNames）。
+ *     哪个箱子里有改过名的物品」另存两张小表（format 2 起：enchants / customNames）；
+ *   - format 4 起每个槽位还单独存 ench / customName（逐格附魔与自定义名）：只有聚合表的话，
+ *     重启游戏后「容器详情」每一格附魔都是空的，用户看到的就是「附魔没实装」。
  *
  * 每个存档一份，而且文件所在目录就是按存档分的。开档时还会校验文件里记录的
  * worldPath 与当前存档一致，不一致就忽略（双保险，避免 A 存档的数据串到 B 存档里）。
@@ -50,8 +60,16 @@ public final class IndexStore {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
 
-    /** 存档格式版本；以后改结构时 +1。format 3：新增附魔 / 自定义名两张小表 */
-    private static final int FORMAT = 3;
+    /**
+     * 存档格式版本；以后改结构时 +1。
+     *
+     * <p>format 4（0.23.0 · 优化11）：容器的每个槽位多存 {@code ench} / {@code customName}
+     * （逐格附魔与自定义名），重启后「容器详情」每一格不再全空。
+     */
+    private static final int FORMAT = 4;
+
+    /** format 3：只有聚合的附魔 / 自定义名两张小表，没有逐格字段（那一栏要重新扫描才会有） */
+    private static final int FORMAT_NO_SLOT_META = 3;
 
     /** format 2：没有附魔 / 自定义名两张表。容器与分类照常读，只是「按附魔搜」要重新扫描 */
     private static final int FORMAT_NO_META = 2;
@@ -133,6 +151,10 @@ public final class IndexStore {
                 it.slot = ss.slot();
                 it.id = ItemIds.of(ss.stack());
                 it.count = ss.stack().getCount();
+                // 逐格附魔 / 自定义名（format 4）：这里拿得到 ItemStack，所以直接用 Scanner 那两个
+                // 与网页 / 面板 / 聚合表完全同源的方法，不另造一套拼串逻辑。
+                it.ench = Scanner.enchantText(ss.stack());
+                it.customName = Scanner.customNameText(ss.stack());
                 cd.items.add(it);
             }
             dto.containers.add(cd);
@@ -186,7 +208,8 @@ public final class IndexStore {
             lastLoadNote = "索引文件为空或格式不符";
             return lastLoadNote;
         }
-        if (dto.format != FORMAT && dto.format != FORMAT_NO_META && dto.format != FORMAT_LEGACY) {
+        if (dto.format != FORMAT && dto.format != FORMAT_NO_SLOT_META
+                && dto.format != FORMAT_NO_META && dto.format != FORMAT_LEGACY) {
             lastLoadNote = "索引文件为旧格式 (format=" + dto.format + ")，已忽略；请重新执行 /warehouse scan";
             return lastLoadNote;
         }
@@ -204,10 +227,16 @@ public final class IndexStore {
                 WarehouseMod.LOGGER.warn("[warehouse-keeper] 旧索引备份失败: {}", e.toString());
             }
         }
-        // format 2 的旧索引能照常用（容器 / 分类都在），只是没有附魔 / 自定义名这两张表
-        String noMeta = dto.format == FORMAT_NO_META
-                ? "，旧索引不含附魔 / 自定义名（要按附魔搜索请重新 /warehouse scan）"
-                : "";
+        // 旧索引都能照常用（容器 / 分类都在）：format 2 完全没有附魔 / 自定义名，
+        // format 3 只有聚合的两张小表、没有逐格字段（面板「容器详情」每格附魔会是空的）
+        String noMeta;
+        if (dto.format == FORMAT_NO_META) {
+            noMeta = "，旧索引不含附魔 / 自定义名（要按附魔搜索请重新 /warehouse scan）";
+        } else if (dto.format == FORMAT_NO_SLOT_META) {
+            noMeta = "，旧索引没有逐格附魔 / 自定义名（面板容器详情每格是空的，要看得重新 /warehouse scan）";
+        } else {
+            noMeta = "";
+        }
         String world = worldPath(server);
         if (dto.worldPath != null && !dto.worldPath.equals(world)) {
             lastLoadNote = "索引文件属于另一个存档，已忽略";
@@ -229,6 +258,14 @@ public final class IndexStore {
                     }
                 }
             }
+        }
+        // 逐格附魔要按注册名还原成组件（format 4）：附魔是数据包动态注册表，只能从服务器注册表取
+        // （BuiltInRegistries 里没有 ENCHANTMENT）。取不到就只跳过逐格附魔，其它字段照旧恢复。
+        Registry<Enchantment> enchantLookup = null;
+        try {
+            enchantLookup = server.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+        } catch (Exception e) {
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] 附魔注册表不可用，逐格附魔将留空: {}", e.toString());
         }
         int ignoredItems = 0;
         for (ContainerDto cd : dto.containers) {
@@ -255,6 +292,7 @@ public final class IndexStore {
                     if (st.isEmpty()) {
                         continue;
                     }
+                    applySlotMeta(st, it, enchantLookup);
                     rec.add(it.slot, st);
                 }
             }
@@ -318,6 +356,70 @@ public final class IndexStore {
                     BuiltInRegistries.ITEM.getKey(item), count, max);
         }
         return new ItemStack(item, Math.min(count, max));
+    }
+
+    /**
+     * 把索引里逐格存下来的附魔 / 自定义名「装回」重建出来的 ItemStack（format 4 · 优化11）。
+     *
+     * <p>为什么走「装回组件」这条路：落盘的只有 {@code id + count}，重建出来的 ItemStack 不带任何
+     * 组件，而 {@code web/WebSnapshot.SlotRow} 与 {@code net/ViewQueryService} 这些下游都是<b>从
+     * ItemStack 现读</b>附魔的 —— 于是重启后面板「容器详情」每一格附魔全空，用户看到的就是
+     * 「附魔没实装」。把 {@code ench} / {@code customName} 还原成真正的 {@code DataComponents}
+     * 之后，上下游一行都不用改：网页、面板、以及按附魔聚合的那两张表全都对得上。
+     *
+     * <p>附魔书的附魔挂在 {@code STORED_ENCHANTMENTS} 上，其它物品用 {@code ENCHANTMENTS}
+     * （跟原版一致）。保存时 {@link Scanner#enchantText(ItemStack)} 把两边合并成一条文本，
+     * 这里按物品类型还原到正确的那一边即可。
+     *
+     * <p>认不出的附魔（整合包换过）、非法等级、空字段一律跳过：老索引缺字段时什么都不装，
+     * 行为与 format 3 完全一致（向后兼容）。
+     */
+    private static void applySlotMeta(ItemStack stack, ItemDto it, Registry<Enchantment> enchants) {
+        if (stack == null || it == null) {
+            return;
+        }
+        if (it.customName != null && !it.customName.isEmpty()) {
+            stack.set(DataComponents.CUSTOM_NAME, Component.literal(it.customName));
+        }
+        if (it.ench == null || it.ench.isEmpty() || enchants == null) {
+            return;
+        }
+        ItemEnchantments.Mutable mutable = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+        boolean any = false;
+        for (String part : it.ench.split(",")) {
+            String one = part.trim();
+            if (one.isEmpty()) {
+                continue;
+            }
+            int at = one.lastIndexOf('@');
+            String id = at > 0 ? one.substring(0, at).trim() : one;
+            int level = 1;
+            if (at > 0) {
+                try {
+                    level = Integer.parseInt(one.substring(at + 1).trim());
+                } catch (NumberFormatException ignored) {
+                    level = 1;
+                }
+            }
+            if (level <= 0) {
+                continue;
+            }
+            Identifier key = Identifier.tryParse(id);
+            if (key == null) {
+                continue;
+            }
+            Holder.Reference<Enchantment> holder = enchants.get(key).orElse(null);
+            if (holder == null) {
+                continue; // 这个附魔在当前整合包里不存在：跳过，别让一格坏掉整份索引
+            }
+            mutable.set(holder, level);
+            any = true;
+        }
+        if (!any) {
+            return;
+        }
+        stack.set(stack.is(Items.ENCHANTED_BOOK) ? DataComponents.STORED_ENCHANTMENTS
+                : DataComponents.ENCHANTMENTS, mutable.toImmutable());
     }
 
     // ------------------------------------------------------------------
@@ -385,5 +487,12 @@ public final class IndexStore {
         int slot;
         String id;
         int count;
+        /**
+         * format 4 起：这一格的附魔，形如 {@code minecraft:sharpness@5,minecraft:unbreaking@3}
+         * （与 {@link Scanner#enchantText(ItemStack)} 同格式）。老索引没有这个字段 = 空串。
+         */
+        String ench = "";
+        /** format 4 起：这一格物品的自定义名原文（铁砧 / 命名牌改过才有）。老索引没有 = 空串 */
+        String customName = "";
     }
 }

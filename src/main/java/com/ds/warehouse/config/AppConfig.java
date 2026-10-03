@@ -42,16 +42,20 @@ public final class AppConfig {
     public boolean scanForceLoadChunks = true;
 
     /**
-     * 不参与仓库管理（不建索引、不统计、不整理）的容器方块 id，逗号分隔。
+     * 不参与仓库管理（不建索引、不统计、也不整理）的容器方块 id，逗号分隔。
      *
-     * <p>默认排除雕纹书架与 26.2 新增的架子 —— 这两类是陈列/装饰性质，被整理会打乱玩家的摆法；
-     * 其余所有容器（箱子、木桶、漏斗、熔炉、发射器、潜影盒……以及模组的箱子）照常统计与整理。
+     * <p><b>0.23.0 起默认空串</b>：以前这里默认排除雕纹书架与 26.2 的架子；现在这两类（以及熔炉、
+     * 漏斗等）也要能被<b>查看</b> —— 面板 / 网页里看得到它们装了什么，只是整理时绝不动它们。
+     * 「不整理」那件事由 {@code index/Containers.NO_TIDY}（{@code Containers.noTidy}）承担，与本项无关。
      *
-     * <p>整合包里若有「只能放特定物品的展示架 / 书架」也想挡掉，把它的方块 id 填进来即可，
-     * 例如 {@code minecraft:chiseled_bookshelf,minecraft:shelf,some_mod:display_rack}。
+     * <p>本项语义不变：填进来的方块<b>连索引都不进</b>（查找 / 统计 / 面板 / 网页全都看不到它）。
+     * 整合包里若有「根本不想让模组碰」的容器，把它的方块 id 填进来即可，
+     * 例如 {@code minecraft:chiseled_bookshelf,some_mod:display_rack}。
      * 空值 / 多余空格 / 大小写都会被 {@link #normalize()} 规整，改动后下一次判定即生效。
+     *
+     * <p>老 {@code settings.json} 里已经写着的值照旧生效（不迁移，也不覆盖用户配置）。
      */
-    public String containerExclude = "minecraft:chiseled_bookshelf,minecraft:shelf";
+    public String containerExclude = "";
 
     /**
      * 要不要给搬运工一个「人形」——用 Carpet 的 /player 指令生成一个真正的假人玩家。

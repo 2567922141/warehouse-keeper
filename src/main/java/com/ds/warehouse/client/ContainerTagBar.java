@@ -13,6 +13,8 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.player.LocalPlayer;
@@ -135,6 +137,14 @@ public final class ContainerTagBar {
             // 这时 containerMenu 还是那份常驻的 inventoryMenu —— 用它把「背包界面」挡在外面，
             // 免得准心对着箱子按 E 时，标签栏也贴到个人物品栏旁边。
             // （两个字段都是原版 public，不需要 mixin。）
+            // 0.23.0 · BUG3（保守版）：显式排除两个「物品栏」屏本身。26.2 的 Gui.setScreen 只调
+            // removed()、从不调 onClose()，而 AbstractContainerScreen.removed() 只调 menu.removed(player)，
+            // **不会**把 player.containerMenu 重置回 inventoryMenu；模组自己在容器界面开着时按 B
+            // 覆盖屏幕（见 WarehouseClient）也会把 containerMenu 卡在旧箱子菜单上。那时下面这条
+            // containerMenu 门控会被骗过，标签栏就贴到了物品栏上 —— 这里直接按屏幕类型挡死。
+            if (screen instanceof InventoryScreen || screen instanceof CreativeModeInventoryScreen) {
+                return;
+            }
             Minecraft mc = Minecraft.getInstance();
             if (mc.player == null || mc.player.containerMenu == mc.player.inventoryMenu) {
                 return;
@@ -427,6 +437,15 @@ public final class ContainerTagBar {
     private static void refresh(Holder holder) {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null) {
+            hide(holder);
+            return;
+        }
+        // 0.23.0 · BUG3（保守版）：屏幕类型 / 菜单身份每 tick 复核一次。
+        // 只在 AFTER_INIT 判一次是不够的 —— BUG3 的根因链正是「屏幕没换，但 containerMenu 已经不是
+        // 这个屏幕的菜单了」（模组自己在容器界面开着时按 B 覆盖屏幕 / 物品栏顶上来）。
+        // 这里一旦发现对不上就把标签栏藏掉，绝不让它贴到物品栏或别的界面上。
+        if (mc.player == null || !(holder.screen instanceof AbstractContainerScreen<?> gui)
+                || gui.getMenu() != mc.player.containerMenu) {
             hide(holder);
             return;
         }

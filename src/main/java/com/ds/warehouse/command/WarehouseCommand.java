@@ -1442,6 +1442,11 @@ public final class WarehouseCommand {
         send(src, "扫描时临时加载区块 scanForceLoadChunks = " + cfg.scanForceLoadChunks
                 + (cfg.scanForceLoadChunks ? "（仓库很远也能扫到）" : "（只扫已加载区块）"));
         send(src, "改设置: /warehouse settings autoscan|autoload|autosave|forcechunks on|off，delay <秒>");
+        send(src, "不进索引的容器 containerExclude = "
+                + (cfg.containerExclude == null || cfg.containerExclude.isBlank()
+                        ? "（空 —— 所有容器都会被索引；要完全不碰某类容器就填方块 id，逗号分隔）"
+                        : cfg.containerExclude));
+        send(src, "（0.23.0 起书架 / 熔炉 / 漏斗这些照常进索引、能查看，只是整理时不动它们）");
         send(src, "配置文件: config/warehouse-keeper/settings.json");
     }
 
@@ -2646,8 +2651,23 @@ public final class WarehouseCommand {
         ContainerTags.save();
         Audit.add(adminName(src), "改标签", "把 " + coordOf(t) + " 设为「" + cat + "」(手动档)");
         send(src, coordOf(t) + " 已贴标签：" + cat + "（手动档，它就是这一类东西的目标箱）");
+        tagNoTidyHint(src, t);
         regionHint(src, t);
         return 1;
+    }
+
+    /**
+     * 0.23.0 · 优化5：贴标签的这只箱子要是「可查看、但不整理」的容器（书架 / 熔炉 / 漏斗……），
+     * 把话说清楚 —— 否则玩家看到「贴了标签却没人往里放东西」会以为模组坏了。
+     */
+    private static void tagNoTidyHint(CommandSourceStack src, Target t) {
+        if (t == null) {
+            return;
+        }
+        ContainerRecord rec = WarehouseMod.INDEX.containers.get(t.key());
+        if (rec != null && Containers.noTidy(rec.blockId)) {
+            send(src, "  注意：这类容器（书架 / 熔炉 / 漏斗……）只供查看，整理时不会把它当目标箱，也不会被搬动。");
+        }
     }
 
     private static int tagAuto(CommandSourceStack src, BlockPos explicit) {

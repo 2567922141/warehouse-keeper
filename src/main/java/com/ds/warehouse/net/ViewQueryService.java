@@ -4,6 +4,7 @@ import com.ds.warehouse.WarehouseMod;
 import com.ds.warehouse.index.ContainerRecord;
 import com.ds.warehouse.index.IndexRefresh;
 import com.ds.warehouse.index.Scanner;
+import com.ds.warehouse.index.WarehouseIndex;
 import com.ds.warehouse.util.Admin;
 import com.ds.warehouse.util.Audit;
 import com.ds.warehouse.util.Names;
@@ -11,6 +12,7 @@ import com.ds.warehouse.web.WebSnapshot;
 import com.google.gson.Gson;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.ItemStack;
@@ -25,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.UUID;
 
 /**
@@ -313,7 +316,9 @@ public final class ViewQueryService {
         int to = Math.min(hits.size(), from + size);
         List<ItemBrief> rows = new ArrayList<>(Math.max(0, to - from));
         for (WebSnapshot.ItemRow r : hits.subList(from, to)) {
-            rows.add(new ItemBrief(r.id, r.name, r.count, r.stacks, r.category, r.refs));
+            String[] meta = itemMeta(r);
+            rows.add(new ItemBrief(r.id, r.name, r.count, r.stacks, r.category, r.refs,
+                    meta[0], meta[1]));
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("total", hits.size());
@@ -428,8 +433,66 @@ public final class ViewQueryService {
     private record CategoryBrief(String name, int kinds, long items, long slots) {
     }
 
+    /**
+     * 物品列表（物品维度）的一行。
+     *
+     * <p>{@code ench} / {@code customName}（0.23.0 · 优化11）：物品是按 id 聚合的，所以这两个字段给的是
+     * 该物品在<b>所有槽位</b>上的并集 —— {@code ench} 是去重后的 {@code 注册名@等级} 用 {@code ,}
+     * 连接（与 {@code SlotDetail.ench} 同格式，客户端同一个解析器就能显示）；{@code customName} 是
+     * 去重后的自定义名用 {@code ; } 连接。无附魔 / 未改名时是空串（老服务端返回缺字段，客户端照旧当空）。
+     */
     private record ItemBrief(String id, String name, long count, String stacks, String category,
-                             int refs) {
+                             int refs, String ench, String customName) {
+    }
+
+    /** 物品维度一行最多拼多少条附魔 / 多少个自定义名（一件物品可能散落在几百只箱子里） */
+    private static final int ITEM_META_MAX = 12;
+    private static final int ITEM_NAME_MAX = 3;
+
+    /**
+     * 物品维度（物品列表一行）的附魔 / 自定义名并集。
+     *
+     * <p>只读内存索引里的 ItemStack —— 不扫世界、不碰区块（与 {@link #container} 逐格取的是同一份
+     * 数据）。0.23.0 起索引从磁盘恢复时会把逐格附魔装回 ItemStack（{@code IndexStore} format 4），
+     * 所以重启之后这里照样有货。
+     *
+     * @return {@code [ench, customName]}，都没命中就是两个空串
+     */
+    private static String[] itemMeta(WebSnapshot.ItemRow r) {
+        TreeSet<String> ench = new TreeSet<>();
+        TreeSet<String> names = new TreeSet<>();
+        if (r != null && r.locations != null) {
+            for (WebSnapshot.LocRow loc : r.locations) {
+                if (ench.size() >= ITEM_META_MAX && names.size() >= ITEM_NAME_MAX) {
+                    break;
+                }
+                ContainerRecord rec = WarehouseMod.INDEX.containers.get(
+                        WarehouseIndex.key(loc.dimension, new BlockPos(loc.x, loc.y, loc.z)));
+                if (rec == null) {
+                    continue;
+                }
+                for (ContainerRecord.StoredStack ss : rec.contents) {
+                    if (ss.slot() != loc.slot) {
+                        continue;
+                    }
+                    ItemStack st = ss.stack();
+                    String e = Scanner.enchantText(st);
+                    if (!e.isEmpty()) {
+                        for (String one : e.split(",")) {
+                            String t = one.trim();
+                            if (!t.isEmpty() && ench.size() < ITEM_META_MAX) {
+                                ench.add(t);
+                            }
+                        }
+                    }
+                    String n = Scanner.customNameText(st);
+                    if (!n.isEmpty() && names.size() < ITEM_NAME_MAX) {
+                        names.add(n);
+                    }
+                }
+            }
+        }
+        return new String[]{String.join(",", ench), String.join("; ", names)};
     }
 
     private record ContainerBrief(String key, String pos, String dimensionName, String blockName,

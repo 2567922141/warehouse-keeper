@@ -96,6 +96,13 @@ public final class Porter {
         public int taken;
         public String note = "";
         public String sourceText = "";
+        /**
+         * 0.23.0：附魔筛选（取货页「按附魔分行」下单时才有货）。
+         *
+         * <p>格式与 {@code ViewQueryService} 的 {@code ench} 字段一致：{@code 注册名@等级} 用 {@code ,}
+         * 连接；空串 = 不限附魔（老行为）。取货时逐格比对这一格的附魔组合，对不上就跳过。
+         */
+        public String ench = "";
         /** 接这单的假人名字（还没派出去就是空串） */
         public String botName = "";
         public long finishedAt;
@@ -166,13 +173,22 @@ public final class Porter {
      * @return null = 收下了；否则是要给玩家看的原因
      */
     public static String request(ServerPlayer player, String query, int count) {
+        // 0.23.0：`<物品>#<附魔组合>` = 只取这个附魔变体（取货页按附魔分行时点哪行就填这个）
+        String ench = "";
+        if (query != null) {
+            int hash = query.lastIndexOf('#');
+            if (hash > 0 && hash < query.length() - 1) {
+                ench = query.substring(hash + 1).trim();
+                query = query.substring(0, hash).trim();
+            }
+        }
         WarehouseIndex.ItemEntry entry = resolve(query);
         if (entry == null) {
             return WarehouseMod.INDEX.items.isEmpty()
                     ? "仓库索引为空，请先执行 /warehouse scan。"
                     : "仓库中没有「" + query + "」这件物品。";
         }
-        return enqueue(player.getName().getString(), player.getUUID(), entry, count);
+        return enqueue(player.getName().getString(), player.getUUID(), entry, count, ench);
     }
 
     /** 网页下单：物品名由 tick 线程解析（HTTP 线程不碰可变的索引） */
@@ -180,7 +196,8 @@ public final class Porter {
         INCOMING.add(new Request(playerName, query, count));
     }
 
-    private static String enqueue(String playerName, UUID playerId, WarehouseIndex.ItemEntry entry, int count) {
+    private static String enqueue(String playerName, UUID playerId, WarehouseIndex.ItemEntry entry, int count,
+                                  String ench) {
         if (PENDING.size() >= MAX_PENDING) {
             return "还有 " + PENDING.size() + " 个订单未完成，请稍后再下单。";
         }
@@ -204,8 +221,11 @@ public final class Porter {
             want = (int) Math.min(entry.total, MAX_ORDER);
             clamped = "（仓库中仅剩这些）";
         }
-        PENDING.addLast(new Order(playerName, playerId, entry.itemId, entry.displayName, want));
-        WarehouseMod.LOGGER.info("[warehouse-keeper] 取货订单: {} 请求 {} 个 {} {}", playerName, want, entry.displayName, clamped);
+        Order o = new Order(playerName, playerId, entry.itemId, entry.displayName, want);
+        o.ench = ench == null ? "" : ench;
+        PENDING.addLast(o);
+        WarehouseMod.LOGGER.info("[warehouse-keeper] 取货订单: {} 请求 {} 个 {} {}{}", playerName, want,
+                entry.displayName, clamped, ench == null || ench.isEmpty() ? "" : "（附魔 " + ench + "）");
         return null;
     }
 
@@ -694,7 +714,7 @@ public final class Porter {
                         : "仓库中没有「" + r.query() + "」这件物品。");
                 continue;
             }
-            String err = enqueue(r.playerName(), null, entry, r.count());
+            String err = enqueue(r.playerName(), null, entry, r.count(), "");
             if (err != null) {
                 reject(r, err);
             }
@@ -936,6 +956,11 @@ public final class Porter {
             // 箱子里的东西变了（索引过期），这一格跳过
             return null;
         }
+        if (!o.ench.isEmpty() && !enchMatches(o.ench, cur)) {
+            // 这单指定了附魔（取货页按附魔分行下单）：这一格的附魔组合对不上就跳过，
+            // 绝不能拿一本「别的附魔书」糊弄过去。
+            return null;
+        }
         int take = Math.min(need, cur.getCount());
         if (take <= 0) {
             return null;
@@ -968,6 +993,31 @@ public final class Porter {
         o.taken += take;
         need -= take;
         return null;
+    }
+
+    /**
+     * 这一格的附魔组合是不是正好等于订单要的那一组。
+     *
+     * <p>两边都是 {@code 注册名@等级} 的 {@code ,} 连接串，但索引与 {@code Scanner} 的拼接顺序不保证，
+     * 所以按**集合**比（顺序无关）；数量也不同时比不相等。
+     */
+    private static boolean enchMatches(String want, ItemStack stack) {
+        Set<String> w = enchSet(want);
+        return !w.isEmpty() && w.equals(enchSet(Scanner.enchantText(stack)));
+    }
+
+    private static Set<String> enchSet(String raw) {
+        Set<String> out = new HashSet<>();
+        if (raw == null || raw.isEmpty()) {
+            return out;
+        }
+        for (String one : raw.split(",")) {
+            String t = one.trim();
+            if (!t.isEmpty()) {
+                out.add(t);
+            }
+        }
+        return out;
     }
 
     static void noteTouched(String dimension, BlockPos pos) {

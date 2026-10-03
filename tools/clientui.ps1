@@ -6,8 +6,8 @@
   [int]$AfterMs = 1500
 )
 
-# 默认输出目录：仓库根目录下的 run/screenshots（可用 -OutDir / -Out 覆盖）。
-$repoRoot = Split-Path -Parent $PSScriptRoot
+# default output dir: <repo>\run\screenshots (ASCII-only comment on purpose)
+$repoRoot = 'D:\DS\warehouse-keeper'
 if ([string]::IsNullOrEmpty($OutDir)) { $OutDir = Join-Path $repoRoot 'run\screenshots' }
 if ([string]::IsNullOrEmpty($Out)) { $Out = Join-Path $OutDir 'ui.png' }
 
@@ -118,6 +118,14 @@ foreach ($step in $Seq.Split(";")) {
       Write-Output ("size step bad: " + $body)
     }
   }
+  elseif ($s.StartsWith("focus:")) {
+    # restore the game window if the OS minimized it mid-sequence, then re-focus
+    [void][WkUi]::ShowWindow($h, 9)
+    Start-Sleep -Milliseconds 220
+    [void][WkUi]::SetForegroundWindow($h)
+    Start-Sleep -Milliseconds 220
+    Write-Output ("focus -> " + ([WkUi]::GetForegroundWindow() -eq $h))
+  }
   elseif ($s.StartsWith("pclick:")) {
     # posted click: works even when the game window is not foreground
     $parts = $s.Substring(7).Split(",")
@@ -148,6 +156,83 @@ foreach ($step in $Seq.Split(";")) {
     [WkUi]::mouse_event($(if ($rc) { 0x0010 } else { 0x0004 }), 0, 0, 0, [UIntPtr]::Zero)
     Write-Output ("clicked client " + $parts[0] + "," + $parts[1] + " -> screen " + $pt.X + "," + $pt.Y)
   }
+  elseif ($s.StartsWith("wheel:")) {
+    # 滚轮：先把真指针挪到客户区 x,y，再滚 notches 格（正 = 远离用户/向上，负 = 向下）
+    # 用真 mouse_event，游戏走的是正常的 MouseHandler，跟玩家自己滚一样
+    $parts = $s.Substring(6).Split(",")
+    $pt = New-Object WkUi+POINT
+    $pt.X = [int]$parts[0]; $pt.Y = [int]$parts[1]
+    [void][WkUi]::ClientToScreen($h, [ref]$pt)
+    [void][WkUi]::SetCursorPos($pt.X, $pt.Y)
+    Start-Sleep -Milliseconds 250
+    $notches = [int]$parts[2]
+    # UInt32 不能直接装负数：-120 用补码 0xFFFFFF88 表示（这是 mouse_event 的约定）
+    $delta = [uint32]120
+    if ($notches -lt 0) { $delta = [uint32]::MaxValue - [uint32]119 }
+    for ($i = 0; $i -lt [Math]::Abs($notches); $i++) {
+      [WkUi]::mouse_event(0x0800, 0, 0, $delta, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 140
+    }
+    Write-Output ("wheel client " + $parts[0] + "," + $parts[1] + " notches=" + $notches)
+  }
+  elseif ($s.StartsWith("pwheel:")) {
+    # posted wheel: 不需要前台也能滚。WM_MOUSEWHEEL 的 lParam 是屏幕坐标（和其它鼠标消息不同）
+    $parts = $s.Substring(7).Split(",")
+    $pt = New-Object WkUi+POINT
+    $pt.X = [int]$parts[0]; $pt.Y = [int]$parts[1]
+    [void][WkUi]::ClientToScreen($h, [ref]$pt)
+    $notches = [int]$parts[2]
+    $delta = [uint32]120
+    if ($notches -lt 0) { $delta = [uint32]::MaxValue - [uint32]119 }
+    $wp = [UIntPtr]::new([uint64]([int64]$delta -shl 16))
+    $lp = [IntPtr]((($pt.Y -band 0xFFFF) -shl 16) -bor ($pt.X -band 0xFFFF))
+    for ($i = 0; $i -lt [Math]::Abs($notches); $i++) {
+      [void][WkUi]::PostMessage($h, 0x020A, $wp, $lp)
+      Start-Sleep -Milliseconds 120
+    }
+    Write-Output ("posted wheel client " + $parts[0] + "," + $parts[1] + " notches=" + $notches)
+  }
+  elseif ($s.StartsWith("pdrag:")) {
+    # posted drag: 不需要前台也能按住拖（LBUTTONDOWN → MOUSEMOVE×8 → LBUTTONUP，lParam 是客户区坐标）
+    $parts = $s.Substring(6).Split(",")
+    $x1 = [int]$parts[0]; $y1 = [int]$parts[1]
+    $x2 = [int]$parts[2]; $y2 = [int]$parts[3]
+    $lp1 = [IntPtr](($y1 -shl 16) -bor ($x1 -band 0xFFFF))
+    [void][WkUi]::PostMessage($h, 0x0201, ([UIntPtr]::new(1)), $lp1)
+    Start-Sleep -Milliseconds 130
+    for ($i = 1; $i -le 8; $i++) {
+      $mx = [int]($x1 + ($x2 - $x1) * $i / 8)
+      $my = [int]($y1 + ($y2 - $y1) * $i / 8)
+      $lpm = [IntPtr](($my -shl 16) -bor ($mx -band 0xFFFF))
+      [void][WkUi]::PostMessage($h, 0x0200, ([UIntPtr]::new(1)), $lpm)
+      Start-Sleep -Milliseconds 70
+    }
+    $lp2 = [IntPtr](($y2 -shl 16) -bor ($x2 -band 0xFFFF))
+    [void][WkUi]::PostMessage($h, 0x0202, [UIntPtr]::Zero, $lp2)
+    Write-Output ("posted drag client " + $x1 + "," + $y1 + " -> " + $x2 + "," + $y2)
+  }
+  elseif ($s.StartsWith("drag:")) {
+    # 按住左键从 (x1,y1) 拖到 (x2,y2)：测滚动条的「按住拖」
+    $parts = $s.Substring(5).Split(",")
+    $x1 = [int]$parts[0]; $y1 = [int]$parts[1]
+    $x2 = [int]$parts[2]; $y2 = [int]$parts[3]
+    $p = New-Object WkUi+POINT
+    $p.X = $x1; $p.Y = $y1
+    [void][WkUi]::ClientToScreen($h, [ref]$p)
+    [void][WkUi]::SetCursorPos($p.X, $p.Y)
+    Start-Sleep -Milliseconds 250
+    [WkUi]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 150
+    for ($i = 1; $i -le 8; $i++) {
+      $q = New-Object WkUi+POINT
+      $q.X = [int]($x1 + ($x2 - $x1) * $i / 8); $q.Y = [int]($y1 + ($y2 - $y1) * $i / 8)
+      [void][WkUi]::ClientToScreen($h, [ref]$q)
+      [void][WkUi]::SetCursorPos($q.X, $q.Y)
+      Start-Sleep -Milliseconds 70
+    }
+    [WkUi]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+    Write-Output ("dragged client " + $x1 + "," + $y1 + " -> " + $x2 + "," + $y2)
+  }
   elseif ($s.StartsWith("key:")) {
     $name = $s.Substring(4).Trim().ToLower()
     if ($vkMap.ContainsKey($name)) {
@@ -166,11 +251,23 @@ foreach ($step in $Seq.Split(";")) {
       if ($c -eq ':') { $shift = $true; $c = ';' }
       if ($c -eq '_') { $shift = $true; $c = '-' }
       if ($c -eq '?') { $shift = $true; $c = '/' }
+      if ($c -eq '{') { $shift = $true; $c = '[' }
+      if ($c -eq '}') { $shift = $true; $c = ']' }
+      if ($c -eq '"') { $shift = $true; $c = "'" }
+      if ($c -eq '@') { $shift = $true; $c = '2' }
+      if ($c -eq '#') { $shift = $true; $c = '3' }
+      if ($c -eq '!') { $shift = $true; $c = '1' }
+      if ($c -eq '(') { $shift = $true; $c = '9' }
+      if ($c -eq ')') { $shift = $true; $c = '0' }
+      if ($c -eq '*') { $shift = $true; $c = '8' }
+      if ($c -eq '+') { $shift = $true; $c = '=' }
       $code = -1
       if ($vkMap.ContainsKey($c)) { $code = $vkMap[$c] }
       elseif ($c -eq '.') { $code = 190 } elseif ($c -eq ',') { $code = 188 }
       elseif ($c -eq '/') { $code = 191 } elseif ($c -eq '-') { $code = 189 }
       elseif ($c -eq ';') { $code = 186 } elseif ($c -eq " ") { $code = 32 }
+      elseif ($c -eq '[') { $code = 219 } elseif ($c -eq ']') { $code = 221 }
+      elseif ($c -eq "'") { $code = 222 } elseif ($c -eq '=') { $code = 187 }
       if ($code -lt 0) { Write-Output ("skip char " + $c); continue }
       if ($shift) { [WkUi]::TapShift([byte]$code) } else { [WkUi]::Tap([byte]$code) }
     }

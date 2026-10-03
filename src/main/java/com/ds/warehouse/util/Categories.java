@@ -262,6 +262,44 @@ public final class Categories {
     }
 
     /**
+     * 箱子标签分类与物品的「贴合精确度」，整理挑目标箱时用（0.23.0 · BUG1）。
+     *
+     * <p>一个旧中文父类标签会同时挂到好几个新页签类上（「酿造附魔」与「矿物金属」都收附魔书），
+     * 光凭 {@link #matches} 分不出哪只箱子更「对口」，于是要在「匹不匹配」之上再定个序：
+     * <ol>
+     *   <li>{@code 0} —— 标签与物品的<b>新页签键</b>完全相同（{@link #of}），最精确；</li>
+     *   <li>{@code 1} —— 标签与物品的<b>旧中文类目名</b>同名（{@link #legacyOf}，即既有旧判定链的
+     *       结果）—— 玩家按 0.20.x 名字贴的箱子属于这一档；物品没有旧名时不成立；</li>
+     *   <li>{@code 2} —— 标签是旧中文父类，{@link #children} 里含物品的新键（{@link #matches} 的
+     *       父类兜底语义），最粗，只有在没有任何更对口的目标箱时才轮到它；</li>
+     *   <li>{@code -1} —— 不匹配。</li>
+     * </ol>
+     *
+     * <p><b>不新造判定链</b>：新键用 {@link #of}，旧名用 {@link #legacyOf}，父类展开用
+     * {@link #children}（{@link #childrenMap}）。{@link #matches} 的对外语义完全不变
+     *（{@code matchRank(...) >= 0} 与 {@code matches(tag, of(itemId))} 等价）。
+     *
+     * @param tagCategory 箱子标签上写的分类：新页签键，或旧中文名（父类）
+     * @param itemId      完整物品 id，例如 {@code minecraft:enchanted_book}
+     * @return 0 / 1 / 2，不匹配是 -1
+     */
+    public static int matchRank(String tagCategory, String itemId) {
+        if (tagCategory == null || tagCategory.isEmpty() || itemId == null || itemId.isEmpty()) {
+            return -1;
+        }
+        String tag = tagCategory.trim();
+        String newKey = of(itemId);
+        if (tag.equals(newKey)) {
+            return 0;
+        }
+        String legacy = legacyOf(itemId);
+        if (legacy != null && !legacy.isEmpty() && tag.equals(legacy)) {
+            return 1;
+        }
+        return children(tag).contains(newKey) ? 2 : -1;
+    }
+
+    /**
      * 旧中文名 → 它「原来管辖」的物品现在的新键集合。
      *
      * <p>不是手写映射表，是<b>运行时推导</b>的（{@link #childrenMap}）：遍历注册表，

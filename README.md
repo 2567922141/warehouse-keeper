@@ -130,7 +130,6 @@ src/main/java/com/ds/warehouse/
 ├── command/               /warehouse 指令树与权限校验
 └── util/                  权限、名称表、审计与通用工具
 src/main/resources/        fabric.mod.json 与语言文件
-tools/                     开发期辅助脚本（RCON、客户端驱动、分类语料）
 ```
 
 ## 已知限制

@@ -20,6 +20,8 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.Container;
 import net.minecraft.world.inventory.AbstractContainerMenu;
@@ -115,6 +117,14 @@ public final class ContainerTagBar {
          * 类目数是动态的（10 → 14+ 都正常），所以不能是常量表。
          */
         final List<String> cats = new ArrayList<>();
+
+        /**
+         * 上面那份清单是按哪一版快照算出来的（{@link ClientSnapshot#receivedAt()}）。
+         *
+         * <p>1.1.1：类目清单的来源之一是服务端快照（{@code categories}），快照一到就要重算 ——
+         * 以前只在 {@code cats} 为空时算一次，服务端换了新类目也只能等关掉界面重开才看得到。
+         */
+        long catsAt = Long.MIN_VALUE;
     }
 
     /**
@@ -222,18 +232,28 @@ public final class ContainerTagBar {
     /**
      * 这一次要画出来的类目键清单。
      *
-     * <p>首选 {@link Categories#order()} —— 创造栏页签顺序 + 「其他」，就是服务端
-     * {@code Categories.of} 会产出的那套键，所以勾选比对是同一个坐标系。
-     *
-     * <p>但客户端**没有 {@code MinecraftServer}**，{@code CreativeOrder} 的表只有服务端
-     * {@code ensure(server)} 才建得起来 ⇒ 单机/联机的客户端拿到的 {@code order()} 往往只剩
-     * 「其他」一个。这时退回旧中文类目名（{@link CategoryRules#LEGACY}）：服务端
-     * {@code Categories.resolve} 认得它们（父类语义），点了也能贴标签。
+     * <p>按四级回落，越靠前越「跟服务端一致」：
+     * <ol>
+     *   <li><b>服务端下发的清单</b>（1.1.1）：{@code ClientSnapshot.categories()}，
+     *       就是房主那边 {@code Categories.order()} 的原样顺序 —— 联机时两边下拉完全一致；</li>
+     *   <li>{@link Categories#order()}：单机 / 房主与集成服务端同 JVM 时能建表，直接用；</li>
+     *   <li>{@link Categories#registryOrder()}：访客进程没有 {@code MinecraftServer}，
+     *       {@code CreativeOrder} 的表建不起来，但页签注册表本身是齐的 —— 用它兜底，
+     *       这样<b>即使连着老版本服务端</b>也不会再退化成旧中文类目名；</li>
+     *   <li>{@link CategoryRules#LEGACY}：最后的保底（老服务端 + 注册表也读不到时）。
+     *       服务端 {@code Categories.resolve} 认得这些旧名（父类语义），点了也能贴标签。</li>
+     * </ol>
      *
      * <p>最后把「当前生效但不在表里」的键补到末尾，否则箱子明明贴着某个类目，下拉里却没有勾。
      */
     private static List<String> categoryKeys(String current) {
-        List<String> keys = new ArrayList<>(Categories.order());
+        List<String> keys = new ArrayList<>(ClientSnapshot.categories());
+        if (keys.size() <= 1) {
+            keys = new ArrayList<>(Categories.order());
+        }
+        if (keys.size() <= 1) {
+            keys = new ArrayList<>(Categories.registryOrder());
+        }
         if (keys.size() <= 1) {
             keys = new ArrayList<>();
             for (String legacy : CategoryRules.LEGACY) {
@@ -249,8 +269,11 @@ public final class ContainerTagBar {
 
     /** 读当前清单；万一某一帧先于 {@code refresh} 用到（还没算过），就地用兜底清单顶上 */
     private static List<String> catsOf(Holder holder) {
-        if (holder.cats.isEmpty()) {
+        long at = ClientSnapshot.receivedAt();
+        if (holder.cats.isEmpty() || holder.catsAt != at) {
+            holder.cats.clear();
             holder.cats.addAll(categoryKeys(currentCategory(holder)));
+            holder.catsAt = at;
         }
         return holder.cats;
     }
@@ -329,8 +352,8 @@ public final class ContainerTagBar {
      * 按坐标取标签，带「双联箱归一化」兜底。
      *
      * <p>服务端把标签记在双联箱归一化的那一半上，而玩家可能正开着另一半，所以要往邻格看一眼。
-     * 但只有<b>原版箱子</b>会拼成双联箱（铁箱子等的 TYPE 恒为 SINGLE），所以只有它才允许看邻格 ——
-     * 否则旁边一只桶/箱子的标签会串到当前这只箱子上。
+     * 但只有<b>能拼成双联箱</b>的方块才准看邻格（原版箱子，以及带箱子 TYPE 属性的模组箱子）；
+     * 木桶 / 潜影盒 / 漏斗这些容器永远不成对，让它们看邻格只会把旁边那格的标签串到这一格上。
      */
     private static ClientSnapshot.Tag tagNear(Minecraft mc, BlockPos pos) {
         if (mc == null || mc.level == null || pos == null) {
@@ -341,16 +364,43 @@ public final class ContainerTagBar {
         if (t != null) {
             return t;
         }
-        if (!(mc.level.getBlockState(pos).getBlock() instanceof ChestBlock)) {
+        BlockState here = mc.level.getBlockState(pos);
+        if (!isDoubleChestLike(here)) {
             return null;
         }
         for (BlockPos n : new BlockPos[]{pos.west(), pos.east(), pos.north(), pos.south()}) {
+            // 邻格必须是**同一种方块**才可能拼成双联箱：不然旁边那只桶 / 另一款箱子的标签
+            // 会被当成这一只的
+            if (!mc.level.getBlockState(n).is(here.getBlock())) {
+                continue;
+            }
             ClientSnapshot.Tag near = ClientSnapshot.tagOf(dim, n.getX(), n.getY(), n.getZ());
             if (near != null) {
                 return near;
             }
         }
         return null;
+    }
+
+    /**
+     * 这只方块有没有可能和邻格拼成双联箱。
+     *
+     * <p>判据是「原版 {@code ChestBlock}」或「状态里有箱子 TYPE 属性」——后者把模组双联箱
+     * （照抄原版 TYPE 属性的那一类）也覆盖进来，同时把木桶 / 潜影盒 / 漏斗 / 熔炉等
+     * 永不成对的容器挡在外面（它们没有 TYPE 属性）。
+     */
+    private static boolean isDoubleChestLike(BlockState st) {
+        if (st == null) {
+            return false;
+        }
+        if (st.getBlock() instanceof ChestBlock) {
+            return true;
+        }
+        try {
+            return st.hasProperty(BlockStateProperties.CHEST_TYPE);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** 自绘下拉清单：深底 + 蓝框 + 当前项打勾 + 悬停高亮（与仓库面板的「仓库：… ▾」同一套） */
@@ -642,6 +692,7 @@ public final class ContainerTagBar {
         // 类目数是动态的：每 tick 重算一次清单（含「当前键不在表里就补上」的兜底）
         holder.cats.clear();
         holder.cats.addAll(categoryKeys(currentCategory(holder)));
+        holder.catsAt = ClientSnapshot.receivedAt();
         int total = holder.cats.size();
         int btnBottom = holder.title.getY() + holder.title.getHeight();
         int below = Math.max(0, screenH - btnBottom - 2);

@@ -54,6 +54,16 @@ public final class ViewQueryService {
 
     private static final Gson GSON = new Gson();
 
+    /**
+     * 物品显示名被刷新过几次（1.1.1）。
+     *
+     * <p>名字只存在 {@code INDEX.items[].displayName} 里：索引的**条目数 / 总数**一个都没变，
+     * 所以 {@code WarehouseMod.INDEX.revision()} 与仓库范围指纹都发现不了它。网页快照靠
+     * {@link WebSnapshot#markDirty()} 显式标脏，游戏内快照（S2C）则把这个计数并进
+     * {@code SnapshotSync.signature()}，否则管理员推完中文名，别的客户端要等到下一次真实变化才更新。
+     */
+    private static volatile int namesRevision;
+
     /** 每个玩家最新的一条查询；服务端线程独占，不需要加锁 */
     private static final Map<UUID, ViewQueryPayload> LATEST = new LinkedHashMap<>();
 
@@ -131,8 +141,25 @@ public final class ViewQueryService {
             }
         }
         if (changed > 0) {
+            // 1.1.1（BUG：数据更新不及时）：名字只存在 INDEX.items[].displayName 里，索引的条目数、
+            // 总数都没变，所以 WebSnapshot 的「空闲变化」判定发现不了它 —— 不显式标脏，网页快照就会
+            // 一直用着那份带英文名的旧实例。面板物品列表是查询时现读索引的，不受影响。
+            WebSnapshot.markDirty();
+            // 游戏内快照（S2C）走的是 SnapshotSync 的指纹，那边同样看不见名字变化（它只看索引 revision
+            // 与仓库范围），所以这里再顶一个计数，让指纹跟着变一次、把新名字推给所有客户端。
+            namesRevision++;
             WarehouseMod.LOGGER.info("[warehouse-keeper] 已按客户端名字表刷新 {} 个物品的显示名", changed);
         }
+    }
+
+    /**
+     * 物品显示名刷新过几次 —— 给 {@code SnapshotSync} 的变化指纹用。
+     *
+     * <p>名字不在索引 revision 的统计范围里（条目数没变），只靠索引指纹发现不了，
+     * 于是「管理员推中文名」这件事在别的客户端看来一直没发生。
+     */
+    public static int namesRevision() {
+        return namesRevision;
     }
 
     /**

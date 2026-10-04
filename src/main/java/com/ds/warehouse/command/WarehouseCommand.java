@@ -13,6 +13,7 @@ import com.ds.warehouse.index.IndexStore;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.Scanner;
 import com.ds.warehouse.index.WarehouseIndex;
+import com.ds.warehouse.net.SnapshotSync;
 import com.ds.warehouse.porter.Body;
 import com.ds.warehouse.porter.Bots;
 import com.ds.warehouse.porter.Homes;
@@ -22,6 +23,7 @@ import com.ds.warehouse.util.Admin;
 import com.ds.warehouse.util.Audit;
 import com.ds.warehouse.util.PlayerPerms;
 import com.ds.warehouse.util.Categories;
+import com.ds.warehouse.util.CreativeOrder;
 import com.ds.warehouse.util.Names;
 import com.ds.warehouse.web.WebSnapshot;
 import com.mojang.brigadier.Command;
@@ -204,6 +206,8 @@ public final class WarehouseCommand {
                                 + "  耗时 " + idx.lastScanMillis + "ms");
                     }
                     showIndexInfo(ctx.getSource());
+                    // 1.1.1：把「同步给玩家」这一环的计数也放出来（组包多大、有没有人没收全、有没有跳过过大的包）
+                    send(ctx.getSource(), SnapshotSync.statusText());
                     // BUG7：有未分类物品就顺手说一句，并指到已有的清单命令（口径与那条命令完全一致）
                     showUnclassifiedHint(ctx.getSource());
                     return 1;
@@ -291,6 +295,14 @@ public final class WarehouseCommand {
                         })
                         .then(Commands.literal("reload").executes(ctx -> {
                             Categories.reload();
+                            // 1.1.1（BUG：分类改了别的客户端跟不上）：重读覆盖表之后必须把三份缓存一起作废，
+                            // 否则面板下拉、创造栏序号、网页快照可能分别停在旧值上：
+                            //   ① Categories 自己的派生缓存  ② 创造栏顺序表（可能根本还没建过）
+                            //   ③ WebSnapshot 里那份已经组装好的总览（categories 就是从它来的）
+                            Categories.clearCaches();
+                            CreativeOrder.invalidate();
+                            CreativeOrder.ensure(ctx.getSource().getServer());
+                            WebSnapshot.markDirty();
                             send(ctx.getSource(), "覆盖表已重读：" + Categories.loadNote());
                             showCategories(ctx.getSource());
                             return 1;
@@ -724,7 +736,7 @@ public final class WarehouseCommand {
     /**
      * {@code /warehouse porter staff [仓库]} —— 「派一名搬运工值守该仓库」。
      *
-     * <p>已有人值守则如实提示；有闲置且未分配仓库的则分配一名；都没有则新建一名。
+     * <p>1.1.1：一间仓库可以派多名假人（第二次执行就是「再派一名」）；先找闲置且未分配仓库的，都没有则新建一名。
      */
     private static int porterStaff(CommandSourceStack src, String region) {
         MinecraftServer server = src.getServer();
@@ -736,10 +748,12 @@ public final class WarehouseCommand {
             send(src, noRegion(region));
             return 0;
         }
+        // 1.1.1：一个仓库可以派多名假人一起整理（以前第二个人直接被这句挡回去）。
+        // 先数一下这间仓库已经有几个人，再照旧「先找闲置的、没有就新建一名」。
+        int already = 0;
         for (Bots.Entry e : Bots.list()) {
             if (region.equals(e.region == null ? "" : e.region)) {
-                send(src, "「" + e.name + "」已在值守仓库「" + region + "」。");
-                return 1;
+                already++;
             }
         }
         Bots.Entry spare = null;
@@ -750,12 +764,14 @@ public final class WarehouseCommand {
                 break;
             }
         }
+        String head = already > 0 ? "「" + region + "」现共 " + (already + 1) + " 名搬运工" : "";
         String name;
         if (spare != null) {
             name = spare.name;
             Bots.assign(name, region);
             Bots.save();
-            send(src, "已安排「" + name + "」改去值守仓库「" + region + "」。");
+            send(src, "已安排「" + name + "」改去值守仓库「" + region + "」。"
+                    + (head.isEmpty() ? "" : "（" + head + "）"));
         } else {
             name = Bots.add(region);
             if (name == null) {
@@ -763,7 +779,8 @@ public final class WarehouseCommand {
                 return 0;
             }
             Bots.save();
-            send(src, "已新增搬运工「" + name + "」值守仓库「" + region + "」。");
+            send(src, "已新增搬运工「" + name + "」值守仓库「" + region + "」。"
+                    + (head.isEmpty() ? "" : "（" + head + "）"));
         }
         Audit.add(adminName(src), "指挥搬运工", "派「" + name + "」值守仓库「" + region + "」");
         Body.Home home = Body.standby(server, name);
@@ -777,7 +794,13 @@ public final class WarehouseCommand {
         return 1;
     }
 
-    /** {@code /warehouse porter tidy [仓库]} / {@code ... sweep [仓库]} —— 自动选一名空闲假人执行 */
+    /**
+     * {@code /warehouse porter tidy [仓库]} —— 让**所有**能干活的值守假人一起上。
+     *
+     * <p>1.1.1：以前这里只挑一名假人（{@code pickFreeBot}），一个仓库就算站了四个人也只有一个人动。
+     * 现在按「值守仓库」分组，同一间仓库里的闲置假人一起开工，并给每人分配 1/N 的箱子（见
+     * {@link Tasks#start(net.minecraft.server.MinecraftServer, String, int, String, int, int)}）。
+     */
     private static int porterTask(CommandSourceStack src, int kind, String region) {
         MinecraftServer server = src.getServer();
         if (RegionStore.REGIONS.isEmpty()) {
@@ -788,33 +811,77 @@ public final class WarehouseCommand {
             send(src, noRegion(region));
             return 0;
         }
-        Bots.Entry pick = pickFreeBot(region);
-        if (pick == null) {
+        // 按值守仓库分组：同一间仓库里的闲置假人一起上；不同仓库各派各的，互不影响分片
+        Map<String, List<Bots.Entry>> byRegion = new LinkedHashMap<>();
+        for (Bots.Entry e : freeBots(region)) {
+            String r = e.region == null ? "" : e.region;
+            List<Bots.Entry> crew = byRegion.get(r);
+            if (crew == null) {
+                crew = new ArrayList<>();
+                byRegion.put(r, crew);
+            }
+            crew.add(e);
+        }
+        if (byRegion.isEmpty()) {
             send(src, Bots.list().isEmpty()
                     ? noBotsYet("porter", false)
                     : "没有可用的搬运工：均忙碌，或未分配值守仓库（用 /warehouse bot assign <搬运工> <仓库> 指定）。");
             return 0;
         }
-        String bad = Tasks.start(server, pick.name, kind, region);
-        if (bad != null) {
-            send(src, bad);
-            return 0;
-        }
-        if (!Body.present(server, pick.name)) {
-            Body.Home home = Body.standby(server, pick.name);
-            if (home != null) {
-                Body.ensure(server, pick.name, home.level(), home.x(), home.y(), home.z());
+        int started = 0;
+        // 同一条失败原因只说一次：清扫下线之类「全员都会失败」的节点不该按人数刷屏
+        Set<String> said = new LinkedHashSet<>();
+        for (Map.Entry<String, List<Bots.Entry>> grp : byRegion.entrySet()) {
+            String r = grp.getKey();
+            List<Bots.Entry> crew = grp.getValue();
+            int parts = crew.size();
+            List<String> ok = new ArrayList<>();
+            for (int i = 0; i < crew.size(); i++) {
+                Bots.Entry e = crew.get(i);
+                String bad = Tasks.start(server, e.name, kind, r, i, parts);
+                if (bad != null) {
+                    if (said.add(bad)) {
+                        send(src, bad);
+                    }
+                    continue;
+                }
+                started++;
+                ok.add(e.name);
+                if (!Body.present(server, e.name)) {
+                    Body.Home home = Body.standby(server, e.name);
+                    if (home != null) {
+                        Body.ensure(server, e.name, home.level(), home.x(), home.y(), home.z());
+                    }
+                }
+            }
+            if (ok.isEmpty()) {
+                continue;
+            }
+            // 有人没开成工（极端情况：派单瞬间被别的命令占走）：参战人数少了，分片得按实际人数重摊，
+            // 否则「没人认领的那几片箱子」整轮都会被跳过 —— 跑完再单跑一次还会剩活。
+            if (ok.size() < parts) {
+                for (int i = 0; i < ok.size(); i++) {
+                    Tasks.retuneParts(ok.get(i), i, ok.size());
+                }
+            }
+            if (ok.size() > 1) {
+                send(src, "仓库「" + r + "」" + Tasks.kindName(kind) + "已分给 " + ok.size() + " 名假人："
+                        + String.join("、", ok) + "（各管 1/" + ok.size() + " 的箱子）。");
+            } else {
+                send(src, "「" + ok.get(0) + "」已开始" + Tasks.kindName(kind) + "（仓库「" + r + "」）。");
             }
         }
-        send(src, "「" + pick.name + "」已开始" + Tasks.kindName(kind) + "（仓库「" + pick.region + "」）。");
-        Audit.add(adminName(src), Tasks.kindName(kind), "让「" + pick.name + "」整理自己值守的仓库「" + pick.region + "」");
+        if (started <= 0) {
+            return 0;
+        }
+        Audit.add(adminName(src), Tasks.kindName(kind), "让 " + started + " 名搬运工整理各自值守的仓库");
         return 1;
     }
 
     /**
      * 批次 6 · D4：{@code /warehouse porter preview [仓库]} —— 干跑一遍整理，只报数、不搬东西。
      *
-     * <p>不带仓库名就把每个仓库都预览一遍（预览不需要空闲假人，所以不走 {@link #pickFreeBot(String)}）。
+     * <p>不带仓库名就把每个仓库都预览一遍（预览不需要空闲假人，所以不走 {@link #freeBots(String)}）。
      */
     private static int porterPreview(CommandSourceStack src, String region) {
         if (RegionStore.REGIONS.isEmpty()) {
@@ -841,11 +908,11 @@ public final class WarehouseCommand {
         return 1;
     }
 
-    /** 选一名空闲假人：只从「已经分配值守仓库」的假人里挑，绝不派跨仓库的活 */
-    private static Bots.Entry pickFreeBot(String region) {
-        Bots.Entry any = null;
+    /** 所有能干活的值守假人（按名册顺序）：只从「已经分配值守仓库」的假人里挑，绝不派跨仓库的活 */
+    private static List<Bots.Entry> freeBots(String region) {
+        List<Bots.Entry> out = new ArrayList<>();
         for (Bots.Entry e : Bots.list()) {
-            if (Tasks.busy(e.name) || Porter.busyWithOrder(e.name)) {
+            if (Tasks.busy(e.name) || Porter.busyWithOrder(e.name) || Bots.isRecalled(e.name)) {
                 continue;
             }
             String r = e.region == null ? "" : e.region;
@@ -855,11 +922,9 @@ public final class WarehouseCommand {
             if (!region.isEmpty() && !region.equals(r)) {
                 continue;
             }
-            if (any == null) {
-                any = e;
-            }
+            out.add(e);
         }
-        return any;
+        return out;
     }
 
     /** {@code /warehouse porter stop} —— 令所有假人停止当前任务 */

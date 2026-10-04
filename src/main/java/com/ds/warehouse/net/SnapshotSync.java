@@ -75,8 +75,38 @@ public final class SnapshotSync {
      * 永远显示「共 0 个」。这里记住上次看到的状态，一变就重发。
      */
     private static final java.util.Map<java.util.UUID, Boolean> ADMIN_SEEN = new java.util.HashMap<>();
-    /** 「快照过大」只提醒一次，免得每 tick 刷日志 */
-    private static boolean oversizeLogged;
+    /**
+     * 标签也得有个上限：标签数随打标的箱子无限长，而 items/boxes 都是每仓截断的。
+     * 过万条标签会把包顶到单包上限，那时 {@link #send} 会**对所有玩家**都发不出去。
+     * 4000 条 ≈ 250 KB，离 4 MB 还很远。
+     */
+    private static final int MAX_TAGS = 4000;
+
+    /**
+     * 上一个冷却周期**没送到**的玩家 → 补发截止时刻（毫秒）。
+     *
+     * <p>以前 {@link #send} 失败（客户端还没准备好收包 / 包过大 / 抛异常）只是静默返回 false，
+     * 而版本记账在发送**之前**就提交了 ⇒ 这名玩家要等到下一次数据变化或重新进服才可能补上。
+     */
+    private static final java.util.Map<java.util.UUID, Long> PENDING = new java.util.HashMap<>();
+    /**
+     * 补发最多坚持多久。
+     *
+     * <p>要够长，才能盖住「刚进服那几秒客户端还没准备好收包」；又要有上限 —— 没装模组的玩家
+     * {@code canSend} 永远是 false，不设期限的话他每次都会重新进补发名单，空闲时的冷却也就永远压不下去。
+     */
+    private static final long PENDING_TTL_MS = 60_000L;
+    /** 因为超过单包上限而被跳过的次数（{@code /warehouse status} 里会显示） */
+    private static volatile int oversizeSkips;
+    /** 上一次「快照过大」的日志时刻：十秒内不重复刷屏 */
+    private static long lastOversizeLogAt;
+
+    /** {@link #send} 的结果：送出去了 */
+    private static final int SENT = 0;
+    /** 这个客户端收不了（没有内容可发）：不必重试 */
+    private static final int SKIP = 1;
+    /** 这次没送成（客户端还没准备好 / 发送异常）：下个周期补发 */
+    private static final int FAILED = 2;
 
     private SnapshotSync() {
     }
@@ -88,13 +118,19 @@ public final class SnapshotSync {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayer player = handler.getPlayer();
             long revision = WarehouseMod.INDEX.revision();
-            String sig = signature();
+            String sig = signature(server);
             if (lastPlain == null || revision != lastRevision || !sig.equals(lastSig)) {
                 rebuild(server);
                 lastRevision = revision;
                 lastSig = sig;
             }
-            send(player, Admin.isAdmin(server, player));
+            // 刚进服这一下客户端可能还没准备好收包（作者在查询通道踩过同样的坑）：
+            // 没送成要记进补发名单，下个周期接着送，而不是让这名玩家整场空着。
+            if (send(player, Admin.isAdmin(server, player)) == FAILED) {
+                markPending(player.getUUID());
+            } else {
+                PENDING.remove(player.getUUID());
+            }
         });
     }
 
@@ -111,14 +147,24 @@ public final class SnapshotSync {
                 adminChanged = true;
             }
         }
-        // 几个便宜的比对：索引内容改过没有、仓库/假人/权限/假人忙闲改过没有。
+        // 补发名单：下线的人要清掉（免得这张表随进出玩家无限长大），过了期限的也要清掉
+        // （没装模组的玩家永远送不到，不能让他把「空闲冷却」一直顶住）
+        if (!PENDING.isEmpty()) {
+            long now = System.currentTimeMillis();
+            PENDING.entrySet().removeIf(e -> e.getValue() < now
+                    || server.getPlayerList().getPlayer(e.getKey()) == null);
+        }
+        // 几个便宜的比对：索引内容改过没有、仓库/假人/权限/分类体系/假人在不在岗改过没有。
         // 都没变就直接返回，不用重新序列化一遍（大仓库能省下不少时间）
         long revision = WarehouseMod.INDEX.revision();
-        String sig = signature();
+        String sig = signature(server);
         boolean changed = adminChanged || lastPlain == null
                 || revision != lastRevision || !sig.equals(lastSig);
-        if (!changed) {
-            cooldown = IDLE_INTERVAL_TICKS;
+        // 内容没变、也没有人要补发 ⇒ 把冷却归零。
+        // 以前这里把冷却重置成 IDLE_INTERVAL_TICKS，于是「闲着的时候改了东西」还要白等 1 秒才推出去
+        // —— 玩家看到的就是「收回假人 / 贴新标签后，别人那边要等一秒才有反应」。
+        if (!changed && PENDING.isEmpty()) {
+            cooldown = 0;
             return;
         }
         // 内容变了就尽快推，面板才能即时看到结果：
@@ -128,20 +174,47 @@ public final class SnapshotSync {
             cooldown--;
             return;
         }
-        lastRevision = revision;
-        lastSig = sig;
-
-        rebuild(server);
-        cooldown = Scanner.isRunning() ? MIN_INTERVAL_TICKS : HOT_INTERVAL_TICKS;
+        if (changed) {
+            // 记账挪到**组包成功之后**：组包一旦抛异常（超大快照 / 序列化问题），先把指纹记成
+            // 「已推送」就会静默停更 —— 内容不再变，于是永远不再重建，玩家一直看旧包。
+            try {
+                rebuild(server);
+            } catch (Throwable t) {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 组包仓库快照失败，稍后重试: {}", t.toString());
+                cooldown = HOT_INTERVAL_TICKS;
+                return;
+            }
+            lastRevision = revision;
+            lastSig = sig;
+            cooldown = Scanner.isRunning() ? MIN_INTERVAL_TICKS : HOT_INTERVAL_TICKS;
+        } else {
+            // 纯补发：也留一个很小的间隔，别每个 tick 都去撞同一个坏连接
+            cooldown = HOT_INTERVAL_TICKS;
+        }
         int sent = 0;
+        int retry = 0;
         for (ServerPlayer p : server.getPlayerList().getPlayers()) {
-            if (send(p, Admin.isAdmin(server, p))) {
+            // 只有「内容变了 / 身份变了 / 上次没送到」的人才重发，别人一个字节都不发
+            if (!changed && !adminChanged && !PENDING.containsKey(p.getUUID())) {
+                continue;
+            }
+            int r = send(p, Admin.isAdmin(server, p));
+            if (r == SENT) {
+                PENDING.remove(p.getUUID());
                 sent++;
+            } else if (r == FAILED) {
+                markPending(p.getUUID());
+                retry++;
+            } else {
+                PENDING.remove(p.getUUID());
             }
         }
         if (sent > 0) {
             WarehouseMod.LOGGER.info("[warehouse-keeper] 已向 {} 名玩家同步仓库快照（{} KB）", sent,
                     lastPlain.length / 1024);
+        }
+        if (retry > 0) {
+            WarehouseMod.LOGGER.debug("[warehouse-keeper] 有 {} 名玩家的仓库快照这次没送达，下个周期补发", retry);
         }
     }
 
@@ -159,13 +232,22 @@ public final class SnapshotSync {
     }
 
     /**
-     * 便宜的变化检测：仓库定义 + 假人名册（值守仓库 / 自定义值守点 / 显示名）+ 账号权限。
+     * 便宜的变化检测：分类体系版本 + 仓库定义 + 标签 + 假人名册（值守仓库 / 自定义值守点 / 显示名 /
+     * 在忙什么 / 在不在岗 / 进度粗档）+ 账号权限。
      *
-     * <p>刻意**不含**假人当前在忙什么 —— 那玩意儿每几秒就变，会让快照一路刷包；
-     * 忙碌状态跟着下一次真正的变化一起发出去就够了。
+     * <p>以前这里刻意不含假人进度（那玩意儿每几秒就变，会让快照一路刷包）。现在改成只取<b>粗档</b>
+     * （{@link Tasks#progressStage(String)}，每 5 只箱子一档）：面板上的「已整理 x/y 箱」能跟着走，
+     * 刷包频率却只有原来的五分之一。
      */
-    private static String signature() {
-        StringBuilder sb = new StringBuilder(regionSignature());
+    private static String signature(MinecraftServer server) {
+        // 分类体系版本：覆盖表重读 / 页签表重建 / 记忆化清空都要能被看见 ——
+        // 否则「改了覆盖表但箱子没动」在服务端看起来什么都没变，玩家的面板会一直用旧的分类。
+        StringBuilder sb = new StringBuilder("K:").append(Categories.revision())
+                .append(':').append(Categories.order().hashCode())
+                // 物品显示名刷新的次数：名字只改 INDEX.items[].displayName，索引 revision 与仓库范围都
+                // 看不出来，不并进指纹的话「管理员推中文名」在别的客户端就一直不生效（F7 的另一半）。
+                .append(":N").append(ViewQueryService.namesRevision()).append('|');
+        sb.append(regionSignature());
         for (Map.Entry<String, ContainerTags.Tag> en : new ArrayList<>(ContainerTags.all().entrySet())) {
             ContainerTags.Tag tag = en.getValue();
             if (tag == null) {
@@ -183,7 +265,11 @@ public final class SnapshotSync {
                     .append("/D:").append(Bots.displayOf(e.name))
                     // 在忙什么（整理 / 送货 / 闲置）也算签名的一部分：状态一变面板就要刷，
                     // 但刻意不含进度百分比（那东西几秒就变一次，会让快照一路推包）
-                    .append("/B:").append(busyKind(e.name)).append('|');
+                    .append("/B:").append(busyKind(e.name))
+                    // 在不在岗（上岗 / 收回）也进指纹：面板那一列按钮按它变
+                    .append("/P:").append(Body.present(server, e.name) ? '1' : '0')
+                    // 进度只取「粗档」（每 5 只箱子一档）：面板能跟着走，又不会每搬一件就刷一次包
+                    .append("/G:").append(Tasks.progressStage(e.name)).append('|');
         }
         for (PlayerPerms.Row a : PlayerPerms.rows()) {
             sb.append(a.name()).append(a.take() ? '1' : '0').append(a.bot() ? '1' : '0')
@@ -235,32 +321,69 @@ public final class SnapshotSync {
         return sb.toString();
     }
 
-    /** 只有装了本模组、且声明能收这个包的客户端才推（原版客户端不会被塞未知包踢下线） */
-    private static boolean send(ServerPlayer player, boolean admin) {
+    /**
+     * 只有装了本模组、且声明能收这个包的客户端才推（原版客户端不会被塞未知包踢下线）。
+     *
+     * @return {@link #SENT} 送出去了；{@link #SKIP} 这次跳过而且不必重试；
+     *         {@link #FAILED} 这次没送成 —— 调用方要把这名玩家记进 {@link #PENDING}，下个周期补发
+     */
+    private static int send(ServerPlayer player, boolean admin) {
         byte[] json = admin ? lastAdmin : lastPlain;
         if (json == null) {
-            return false;
+            return SKIP;
         }
         if (!ServerPlayNetworking.canSend(player, SnapshotPayload.TYPE)) {
-            return false;
+            // 客户端还没准备好收这个包：刚进服握手还没走完，或者根本没装模组。
+            // 两种都记成待补发 —— 没装模组的那位只是每次做一个便宜的查表，不占带宽；
+            // 而「刚进服那一下」正是以前会静默丢掉、让玩家整场看不到仓库的那种情况。
+            return FAILED;
         }
         // 超过注册的单包上限就直接不发：宁可玩家这次没刷新，也不要让 send 抛异常打断整个 tick
         if (json.length > MAX_BYTES) {
-            if (!oversizeLogged) {
-                oversizeLogged = true;
-                WarehouseMod.LOGGER.warn("[warehouse-keeper] 仓库快照过大（{} KB，上限 {} KB），已跳过推送；"
-                        + "请缩小仓库范围或减少箱子数量", json.length / 1024, MAX_BYTES / 1024);
+            oversizeSkips++;
+            long now = System.currentTimeMillis();
+            if (now - lastOversizeLogAt > 10_000L) {
+                lastOversizeLogAt = now;
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 仓库快照过大（{} KB，上限 {} KB），已跳过推送"
+                        + "（第 {} 次，/warehouse status 可看计数）；请缩小仓库范围或减少箱子 / 标签数量",
+                        json.length / 1024, MAX_BYTES / 1024, oversizeSkips);
             }
-            return false;
+            return SKIP;
         }
         try {
             ServerPlayNetworking.send(player, new SnapshotPayload(json));
         } catch (Throwable t) {
             // 单个玩家发包失败（连接正在断开等）不能影响其它玩家与后续 tick
             WarehouseMod.LOGGER.warn("[warehouse-keeper] 向 {} 推送仓库快照失败", player.getName().getString(), t);
-            return false;
+            return FAILED;
         }
-        return true;
+        return SENT;
+    }
+
+    /**
+     * 同步通道的自查数据，给 {@code /warehouse status} 用。
+     *
+     * <p>「快照过大」以前只写一次日志、玩家那边毫无提示，出了问题根本查不出来；这里把它和一个周期内
+     * 没送达的玩家数摆到台面上。
+     *
+     * @return 一行文字
+     */
+    public static String statusText() {
+        int kb = lastPlain == null ? 0 : lastPlain.length / 1024;
+        return "仓库同步: 上次组包 " + kb + " KB（上限 " + (MAX_BYTES / 1024) + " KB）"
+                + "  待补发 " + PENDING.size() + " 人"
+                + "  过大跳过 " + oversizeSkips + " 次";
+    }
+
+    /**
+     * 记进补发名单（带期限，见 {@link #PENDING_TTL_MS}）。
+     *
+     * <p>用 {@code putIfAbsent}：**不延长**已有的期限。没装模组的玩家 {@code canSend} 永远为 false，
+     * 如果每次失败都把期限往后推，这张表就永远清不掉、空闲时的冷却也永远压不下去。现在他最多被
+     * 重试一分钟，之后静默退出名单（真正在握手的模组客户端两三秒内就收上了，一分钟足够富余）。
+     */
+    private static void markPending(java.util.UUID id) {
+        PENDING.putIfAbsent(id, System.currentTimeMillis() + PENDING_TTL_MS);
     }
 
     /**
@@ -270,6 +393,7 @@ public final class SnapshotSync {
      */
     public static void forget(java.util.UUID id) {
         ADMIN_SEEN.remove(id);
+        PENDING.remove(id);
     }
 
     // ------------------------------------------------------------------
@@ -281,6 +405,9 @@ public final class SnapshotSync {
         dto.at = System.currentTimeMillis();
         dto.regions = new ArrayList<>();
         dto.bots = new ArrayList<>();
+        // 类目清单（1.1.1）：客户端进程里没有 MinecraftServer，自己算不出这套键
+        // ⇒ 由服务端发过去，访客的标签栏下拉才会与房主完全一致（连顺序都一样）。
+        dto.categories = new ArrayList<>(Categories.order());
 
         WebSnapshot snap = WebSnapshot.current();
         for (Region r : RegionStore.REGIONS.values()) {
@@ -351,6 +478,11 @@ public final class SnapshotSync {
         // 箱子标签（批次 3）：游戏内标签栏与网页面板都要看「这只箱子现在贴的是什么」
         dto.tags = new ArrayList<>();
         for (Map.Entry<String, ContainerTags.Tag> en : new ArrayList<>(ContainerTags.all().entrySet())) {
+            // 标签没有「每仓截断」那层保护，这里必须有：标签多到把包顶爆时，受害的是所有玩家
+            if (dto.tags.size() >= MAX_TAGS) {
+                dto.truncated = true;
+                break;
+            }
             ContainerTags.Tag tag = en.getValue();
             if (tag == null) {
                 continue;
@@ -594,6 +726,13 @@ public final class SnapshotSync {
         List<BotDto> bots = new ArrayList<>();
         /** 箱子标签（批次 3）：游戏内标签栏与网页面板共用 */
         List<TagDto> tags = new ArrayList<>();
+        /**
+         * 类目键清单（1.1.1）：服务端 {@code Categories.order()} 的展示顺序 + 「其他」。
+         *
+         * <p>给客户端标签栏下拉用 —— 客户端没有 {@code MinecraftServer}，自己算不出这套键。
+         * 老服务端不发这一段 ⇒ 客户端解析后是空表 ⇒ 自动退回本机注册表兜底。
+         */
+        List<String> categories = new ArrayList<>();
         /** 只有管理员那份才带；普通客户端收到的 JSON 里没有这个字段 */
         List<AccountDto> accounts;
     }

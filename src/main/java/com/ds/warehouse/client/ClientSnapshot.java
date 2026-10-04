@@ -148,6 +148,12 @@ public final class ClientSnapshot {
         List<Bot> bots = new ArrayList<>();
         List<Tag> tags = new ArrayList<>();
         List<Account> accounts;
+        /**
+         * 类目键清单（1.1.1）：服务端 {@code Categories.order()} 的顺序。
+         *
+         * <p>老服务端不发这一段 ⇒ 解析后是空表 ⇒ {@code ContainerTagBar} 自动退回本机注册表兜底。
+         */
+        List<String> categories = new ArrayList<>();
     }
 
     private static final Gson GSON = new Gson();
@@ -157,6 +163,8 @@ public final class ClientSnapshot {
     private static volatile List<Tag> tags = Collections.emptyList();
     private static volatile Map<String, Tag> tagMap = Collections.emptyMap();
     private static volatile List<Account> accounts = Collections.emptyList();
+    /** 服务端给的类目键清单（展示顺序）；老服务端是空表 */
+    private static volatile List<String> categories = Collections.emptyList();
     private static volatile long receivedAt;
     private static volatile String version = "";
     private static volatile String note = "等待服务端同步…";
@@ -256,6 +264,16 @@ public final class ClientSnapshot {
             tags = List.copyOf(cleanTags);
             tagMap = Map.copyOf(map);
             accounts = p.accounts == null ? Collections.emptyList() : List.copyOf(p.accounts);
+            // 类目清单（1.1.1）：老服务端没有这个字段 ⇒ 空表 ⇒ 标签栏退回本机注册表兜底
+            List<String> cats = new ArrayList<>();
+            if (p.categories != null) {
+                for (String c : p.categories) {
+                    if (c != null && !c.isEmpty() && !cats.contains(c)) {
+                        cats.add(c);
+                    }
+                }
+            }
+            categories = List.copyOf(cats);
             receivedAt = System.currentTimeMillis();
             version = p.version == null ? "" : p.version;
             note = regions.isEmpty()
@@ -263,7 +281,11 @@ public final class ClientSnapshot {
                     : ("服务端同步 · 共 " + regions.size() + " 个仓库"
                     + (p.truncated ? "（物品过多，仅同步部分）" : ""));
         } catch (Exception e) {
-            note = "服务端同步数据解析失败: " + e.getClass().getSimpleName();
+            // 解析失败绝不把上一份数据丢掉（玩家至少还能看旧内容），但要把话说清楚：
+            // 服务端只在「内容变化」时才补发，所以要么等下一次变化，要么重新进服。
+            String tail = hasData()
+                    ? "（界面仍显示上一次的数据；等服务端下次变化或重新进服即可恢复）" : "";
+            note = "服务端同步数据解析失败: " + e.getClass().getSimpleName() + tail;
         }
     }
 
@@ -274,6 +296,7 @@ public final class ClientSnapshot {
         tags = Collections.emptyList();
         tagMap = Collections.emptyMap();
         accounts = Collections.emptyList();
+        categories = Collections.emptyList();
         receivedAt = 0L;
         version = "";
         note = "等待服务端同步…";
@@ -312,6 +335,16 @@ public final class ClientSnapshot {
     /** 网页账号的三项权限；非管理员客户端拿到的是空表 */
     public static List<Account> accounts() {
         return accounts;
+    }
+
+    /**
+     * 服务端下发的类目键清单（展示顺序，含末尾的「其他」）。
+     *
+     * <p>{@code ContainerTagBar} 优先用它画标签栏下拉 —— 这样访客看到的类目与房主完全一致。
+     * 老服务端不发这一段（空表）时由调用方退回本机注册表兜底。
+     */
+    public static List<String> categories() {
+        return categories;
     }
 
     public static Region find(String name) {

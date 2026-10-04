@@ -93,6 +93,23 @@ public final class Categories {
     private static volatile boolean loaded;
     private static volatile String loadNote = "尚未读取覆盖表";
 
+    /**
+     * 分类体系的版本号：覆盖表重读、记忆化清空、页签表重建都会 +1。
+     *
+     * <p>快照同步（{@code net.SnapshotSync}）把它写进变化指纹 —— 否则「改了覆盖表但箱子没动」
+     * 这种变化在服务端看起来什么都没变，玩家的面板会一直用旧的分类固定不动。
+     */
+    private static volatile long revision;
+
+    /** 分类体系改过没有（只增不减，热路径只读一个 volatile long） */
+    public static long revision() {
+        return revision;
+    }
+
+    private static void bumpRevision() {
+        revision++;
+    }
+
     /** 标签规则：id 的 path 命中即归该分类；prefix=true 时按前缀命中（c:foods/* 这种） */
     private record TagRule(String tag, boolean prefix, String category) {
     }
@@ -436,6 +453,75 @@ public final class Categories {
         return keys;
     }
 
+    /**
+     * 客户端兜底用的类目清单：<b>本机注册表</b>里的全部类目页签（注册顺序），末尾追加 {@link #OTHER}。
+     *
+     * <p>为什么需要它：{@link #order()} 依赖 {@link CreativeOrder} 的页签表，而那张表只有
+     * {@code ensure(MinecraftServer)} 在服务端才建得起来。访客（联机 / 专用服的普通玩家）进程里
+     * 根本没有 {@code MinecraftServer} ⇒ {@code order()} 只剩「其他」⇒ 标签栏下拉退化成旧中文类目名，
+     * 看着就像「新版本的标签同步不过来」。页签注册表在客户端本身是齐的，用它兜底就能对上。
+     *
+     * <p>名称还没加载出来（页签名还是 {@code itemGroup.xxx} 这种 lang 键）的先不收：
+     * 宁可少列几项，也不要在下拉里显示一串英文键。
+     */
+    public static List<String> registryOrder() {
+        List<String> out = new ArrayList<>();
+        for (Identifier id : BuiltInRegistries.CREATIVE_MODE_TAB.keySet()) {
+            // 注册表里偶尔会有注册到一半 / 别的模组塞进来的怪页签：整段包 try，
+            // 一个页签翻车不能让整个下拉退化成「其他」。
+            try {
+                CreativeModeTab tab = BuiltInRegistries.CREATIVE_MODE_TAB.getValue(id);
+                if (tab == null || tab.getType() != CreativeModeTab.Type.CATEGORY) {
+                    continue;
+                }
+                if (!hasReadableName(tab)) {
+                    continue;
+                }
+                String key = id.toString();
+                if (!out.contains(key)) {
+                    out.add(key);
+                }
+            } catch (Throwable t) {
+                continue;
+            }
+        }
+        out.remove(OTHER);
+        out.add(OTHER);
+        return List.copyOf(out);
+    }
+
+    /** 页签名能不能看：翻不出来（还是 lang 键的样子）就先不用它 */
+    private static boolean hasReadableName(CreativeModeTab tab) {
+        String s;
+        try {
+            s = tab.getDisplayName().getString();
+        } catch (Throwable t) {
+            return false;
+        }
+        return s != null && !s.isEmpty() && !looksLikeLangKey(s);
+    }
+
+    /**
+     * 像不像一条<b>没翻译出来</b>的 lang 键：{@code itemGroup.buildingBlocks}、
+     * {@code block.minecraft.stone} 这种「全是字母数字点下划线、且带点」的串。
+     *
+     * <p>有空格或冒号的一律当成人话（中文名、英文名、模组自己写死的名字）。
+     */
+    private static boolean looksLikeLangKey(String s) {
+        if (s.indexOf(' ') >= 0 || s.indexOf(':') >= 0 || s.indexOf('.') < 0) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                    || c == '_' || c == '.';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // ------------------------------------------------------------------
     // 旧名（父类）→ 新键：运行时推导 + 保护性缓存
 
@@ -659,6 +745,7 @@ public final class Categories {
         if (saved != null && !saved.isEmpty()) {
             MEMO.putAll(saved);
         }
+        bumpRevision();
     }
 
     /** 给落盘用的快照 */
@@ -683,6 +770,7 @@ public final class Categories {
     public static synchronized void clearCaches() {
         MEMO.clear();
         CHILDREN = null;
+        bumpRevision();
     }
 
     // ------------------------------------------------------------------
@@ -722,6 +810,12 @@ public final class Categories {
             return;
         }
         loaded = true;
+        readOverrides();
+        bumpRevision();
+    }
+
+    /** 真正读文件那一段（只由 {@link #ensureLoaded()} 在锁里调一次） */
+    private static void readOverrides() {
         Path f = overrideFile();
         try {
             if (!Files.isRegularFile(f)) {

@@ -200,6 +200,16 @@ public final class Tasks {
         boolean dirty;
         /** 批次 1 · P4 按来源箱分组：现在盯着的来源箱子 key，先把这箱的活干完再换（null = 重新扫） */
         String focus;
+        /** {@link #focus} 在整理顺序里是第几只（1 起）；0 = 还没盯上任何箱子。省掉每次进度都重扫一遍 */
+        int focusIdx;
+        /**
+         * 多假人分工（1.1.1）：本假人负责第 {@link #part} 片（0 起），一共切成 {@link #parts} 片。
+         *
+         * <p>切分口径是「按来源箱哈希取模」：每名假人只碰自己那一片的箱子，天然不会两人盯同一只。
+         * {@code parts == 1} 就是老行为（一个人干整仓）。
+         */
+        int part;
+        int parts = 1;
         /** 批次 1 · P5：本次是因为撞上「件数/时间上限」而停的（不是把活干完了）⇒ 报告里要让玩家知道可以再跑一次接着干 */
         boolean limited;
         /** 批次 3（附录 J.6）：这一轮里有多少件被送进了「贴了标签的目标箱」 */
@@ -220,6 +230,18 @@ public final class Tasks {
         Job(int kind, String region) {
             this.kind = kind;
             this.region = region == null ? "" : region;
+        }
+
+        /**
+         * 多假人分工（1.1.1）：同一个仓库里几个人一起干时，每人只负责自己那一片。
+         *
+         * @param part  本假人负责第几片（0 起，越界会自动折回）
+         * @param parts 一共几片；1 = 一个人干整仓（老行为）
+         */
+        Job(int kind, String region, int part, int parts) {
+            this(kind, region);
+            this.parts = Math.max(1, parts);
+            this.part = Math.floorMod(part, this.parts);
         }
 
         void touch(String dimension, BlockPos pos) {
@@ -291,6 +313,21 @@ public final class Tasks {
 
     /** @return null = 开工了；否则是要给玩家看的原因 */
     public static String start(MinecraftServer server, String botName, int kind, String region) {
+        return start(server, botName, kind, region, 0, 1);
+    }
+
+    /**
+     * 开工（多假人分工版）。
+     *
+     * <p>同一个仓库里派了 N 个假人时，命令层会给每人一个 {@code part}（0 起）和 {@code parts = N}，
+     * 每人只碰「来源箱 key 哈希取模后落在自己这一片」的箱子（见 {@link #mine}）。口径是箱子而不是
+     * 物品类别，所以归位/合并的判定完全不变，只是把整仓的箱子分给了几个人。
+     *
+     * @param part  本假人负责第几片（0 起）
+     * @param parts 一共几片；1 = 一个人干整仓（老行为）
+     * @return null = 开工了；否则是要给玩家看的原因
+     */
+    public static String start(MinecraftServer server, String botName, int kind, String region, int part, int parts) {
         if (server == null || botName == null || botName.isEmpty()) {
             return "名册中没有该搬运工。";
         }
@@ -328,9 +365,15 @@ public final class Tasks {
             return botName + " 值守的是仓库「" + assigned + "」，只能在「" + assigned + "」内执行任务。";
         }
         r = assigned;
-        JOBS.put(botName, new Job(kind, r));
-        WarehouseMod.LOGGER.info("[warehouse-keeper] 搬运工 {} 开始{}（值守仓库：{}）",
-                botName, kindName(kind), r);
+        Job job = new Job(kind, r, part, parts);
+        JOBS.put(botName, job);
+        if (job.parts > 1) {
+            WarehouseMod.LOGGER.info("[warehouse-keeper] 搬运工 {} 开始{}（值守仓库：{}，第 {}/{} 片）",
+                    botName, kindName(kind), r, job.part + 1, job.parts);
+        } else {
+            WarehouseMod.LOGGER.info("[warehouse-keeper] 搬运工 {} 开始{}（值守仓库：{}）",
+                    botName, kindName(kind), r);
+        }
         return null;
     }
 
@@ -341,6 +384,8 @@ public final class Tasks {
             // 取消也必须收尾（批次 1 · A1-c）：/warehouse bot stop 之后不能把已经捡到的物品留在假人身上，
             // 也不能让副手那叠「表演副本」留在手上，整理过的箱子同样要触发局部重扫。
             cleanup(WarehouseMod.server(), botName, j);
+            // 半路停掉一个同伴后，剩下的人要把它的那一份接过来（否则那片箱子这一轮没人碰）
+            rebalance(j.region);
         }
         return j != null;
     }
@@ -379,6 +424,72 @@ public final class Tasks {
         CLAIMS.values().removeIf(botName::equals);
     }
 
+    /** 放掉某一个来源箱的认领（只有自己认领的才放），换箱子时立刻用 */
+    private static void releaseClaim(String botName, String key) {
+        if (key != null && botName.equals(CLAIMS.get(key))) {
+            CLAIMS.remove(key);
+        }
+    }
+
+    /**
+     * 多假人分工的补救：派单时有同伴没能开工，参战人数比原计划少，得把分片重新摊一次。
+     *
+     * <p>不重摊的话，原本分给「没来的人」的那几片箱子这一轮没人会碰 —— 报告却会说整理完了。
+     * 重摊会把手上那只箱子放开（认领也一起放），让它按新口径重新挑，所以不会漏也不会重复。
+     *
+     * @return true = 确实重摊了（口径变了）
+     */
+    public static boolean retuneParts(String botName, int part, int parts) {
+        Job j = JOBS.get(botName);
+        if (j == null) {
+            return false;
+        }
+        int p = Math.max(1, parts);
+        int q = Math.floorMod(part, p);
+        if (j.parts == p && j.part == q) {
+            return false;
+        }
+        releaseClaim(botName, j.focus);
+        j.focus = null;
+        j.focusIdx = 0;
+        j.parts = p;
+        j.part = q;
+        return true;
+    }
+
+    /**
+     * 多假人分工的再平衡：同一间仓库里有人收工之后，剩下的同伴按**实际还在干的人数**重摊分片。
+     *
+     * <p>触发点都在「一个任务从 {@link #JOBS} 里消失」的地方（{@link #finish} 与
+     * {@link #cancel}）。因为一个假人可能是「被停掉 / 出错 / 不在世界」而半路收工的，
+     * 它原来负责的那一片箱子如果不重摊，这一轮就彻底没人碰了（面板上同伴还会一路显示「本片 x/y」到头）。
+     *
+     * <p>只在该仓还有 {@code parts > 1} 的任务时才动手 —— 单人整仓（老行为）与别的仓库都不受影响。
+     */
+    private static void rebalance(String region) {
+        if (region == null || region.isEmpty()) {
+            return;
+        }
+        List<String> names = new ArrayList<>();
+        boolean sharded = false;
+        for (Map.Entry<String, Job> en : JOBS.entrySet()) {
+            Job j = en.getValue();
+            if (j.kind != TIDY || !region.equals(j.region)) {
+                continue;
+            }
+            names.add(en.getKey());
+            if (j.parts > 1) {
+                sharded = true;
+            }
+        }
+        if (!sharded || names.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < names.size(); i++) {
+            retuneParts(names.get(i), i, names.size());
+        }
+    }
+
     // ------------------------------------------------------------------
     // 主循环
 
@@ -409,6 +520,9 @@ public final class Tasks {
     private static void finish(MinecraftServer server, String botName, Job j, String why) {
         JOBS.remove(botName);
         releaseClaims(botName);
+        // 有人收工（干完 / 到上限 / 出错 / 不在世界）后，同仓的同伴按实际人数重摊分片：
+        // 收工那人若没干完自己那一份，剩下的箱子不能就这么留着没人管。
+        rebalance(j.region);
         cleanup(server, botName, j);
         String report = report(j);
         WarehouseMod.LOGGER.info("[warehouse-keeper] 搬运工 {} {}结束{} — {}",
@@ -513,15 +627,10 @@ public final class Tasks {
         if (total <= 0) {
             return "";
         }
-        int idx = 0;
-        if (j.focus != null) {
-            for (int i = 0; i < total; i++) {
-                ContainerRecord rec = order.get(i);
-                if (rec != null && rec.pos != null && j.focus.equals(WarehouseIndex.key(rec.dimension, rec.pos))) {
-                    idx = i + 1;
-                    break;
-                }
-            }
+        // 1.1.1：盯上箱子时就把下标记进 Job（focusIdx），这里不再重扫一遍整理顺序
+        int idx = j.focus == null ? 0 : j.focusIdx;
+        if (idx > total) {
+            idx = total;
         }
         long ms = Math.max(0L, (System.nanoTime() - j.startedNanos) / 1_000_000L);
         String eta;
@@ -536,7 +645,42 @@ public final class Tasks {
         // 现在手上这只箱子（玩家照着这个坐标就能看到它在干活）
         String where = j.lidPos == null ? ""
                 : " · 正在整理 " + j.lidPos.getX() + "," + j.lidPos.getY() + "," + j.lidPos.getZ();
-        return "已整理 " + Math.min(idx, total) + "/" + total + " 箱" + where + eta;
+        if (j.parts > 1) {
+            // 多假人分工：既要能看出「我这一片还剩多少」，也要能看出「整仓到哪了」
+            int inPart = 0;
+            int doneInPart = 0;
+            for (int i = 0; i < total; i++) {
+                ContainerRecord rec = order.get(i);
+                if (rec == null || rec.pos == null || !mine(j, WarehouseIndex.key(rec.dimension, rec.pos))) {
+                    continue;
+                }
+                inPart++;
+                if (i + 1 <= idx) {
+                    doneInPart++;
+                }
+            }
+            return "本片 " + doneInPart + "/" + inPart + " 箱 · 全仓 " + idx + "/" + total + " 箱" + where + eta;
+        }
+        return "已整理 " + idx + "/" + total + " 箱" + where + eta;
+    }
+
+    /**
+     * 进度「粗档」：每 5 只箱子算一档，只给 {@code SnapshotSync} 的变化指纹用。
+     *
+     * <p>进度一点都不进指纹，别的客户端就会一直看着「已整理 1/N 箱」不动；每次都进指纹，
+     * 又会每个冷却周期都推一份可能很大的快照。折中成粗档：跨过 5 只箱子才认为变了。
+     *
+     * @return 档位（越大越接近干完）；-1 = 这个假人现在没在整理
+     */
+    public static int progressStage(String botName) {
+        Job j = JOBS.get(botName);
+        if (j == null || j.kind != TIDY) {
+            return -1;
+        }
+        if (j.focus == null) {
+            return 0;
+        }
+        return j.focusIdx / 5;
     }
 
     /**
@@ -768,10 +912,25 @@ public final class Tasks {
             if (m != null) {
                 return m;
             }
+            // 1.1.1：这口箱子真干完了，**立刻把认领放掉**。以前要等收工才释放，多假人同仓时
+            // 别的假人只能干等（它明明已经没活了）。放掉之后别人下一 tick 就能接手。
+            releaseClaim(botName, j.focus);
             j.focus = null;
+            j.focusIdx = 0;
         }
-        for (ContainerRecord rec : tidyOrder(j.region)) {
+        List<ContainerRecord> order = tidyOrder(j.region);
+        for (int i = 0; i < order.size(); i++) {
+            ContainerRecord rec = order.get(i);
+            // 判空与同文件 taggedBoxes / tagRank 一个口径：整理顺序里理论上不会有 null，
+            // 但真混进来一条也不该把整轮任务用 NPE 打断（那时会被 catch 吞成「任务莫名中止」）。
+            if (rec == null || rec.pos == null) {
+                continue;
+            }
             String key = WarehouseIndex.key(rec.dimension, rec.pos);
+            // 1.1.1 多假人分工：不归自己这一片的箱子直接跳过（别人的活不碰）
+            if (!mine(j, key)) {
+                continue;
+            }
             if (claimedByOther(botName, key)) {
                 // 批次 1 · R14：这口箱子已经有别的假人在整理了，跳过（否则两人会把同一摞搬两次）
                 continue;
@@ -779,11 +938,26 @@ public final class Tasks {
             Move m = planIn(server, j, rec);
             if (m != null) {
                 j.focus = key;
+                j.focusIdx = i + 1;
                 claim(botName, key);
                 return m;
             }
         }
         return null;
+    }
+
+    /**
+     * 这只箱子归不归这个假人管（1.1.1 多假人分工）。
+     *
+     * <p>按来源箱 key 的哈希取模分片：同一次派单里每个假人 {@code part} 不同、{@code parts} 相同，
+     * 所以箱子既不会漏（每人只管一片、合起来是全集）也不会重（一片只属于一个人）。
+     * {@code parts <= 1} 时全部归自己，就是 1.1.1 之前「一个人干整仓」的行为。
+     */
+    private static boolean mine(Job j, String key) {
+        if (j.parts <= 1 || key == null) {
+            return true;
+        }
+        return Math.floorMod(key.hashCode(), j.parts) == j.part;
     }
 
     /** 只看这一个箱子能干什么（{@code rec} 为 null 就直接返回 null） */
@@ -1657,6 +1831,9 @@ public final class Tasks {
             m.put("kind", kindName(j.kind));
             m.put("region", j.region);
             m.put("steps", j.steps);
+            // 1.1.1 多假人分工：面板要能显示「第 2/3 片」，也让客户端自己算出这个假人管哪一片
+            m.put("part", j.part);
+            m.put("parts", j.parts);
             m.put("progress", report(j));
             out.add(m);
         }

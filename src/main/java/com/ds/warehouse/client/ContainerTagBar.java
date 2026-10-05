@@ -13,6 +13,7 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import net.minecraft.client.gui.screens.inventory.AbstractRecipeBookScreen;
 import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.input.KeyEvent;
@@ -153,6 +154,18 @@ public final class ContainerTagBar {
             // 覆盖屏幕（见 WarehouseClient）也会把 containerMenu 卡在旧箱子菜单上。那时下面这条
             // containerMenu 门控会被骗过，标签栏就贴到了物品栏上 —— 这里直接按屏幕类型挡死。
             if (screen instanceof InventoryScreen || screen instanceof CreativeModeInventoryScreen) {
+                return;
+            }
+            // 1.1.2 · BUG2：工作方块（工作台 / 熔炉 / 高炉 / 烟熏炉…）都是 AbstractRecipeBookScreen。
+            // 打开配方书时原版会把 GUI 右移：AbstractRecipeBookScreen.init() 里
+            // leftPos = recipeBookComponent.updateScreenPosition(width, imageWidth)
+            //         = (配方书可见 && width >= 379) ? 177 + (width - imageWidth - 200) / 2
+            //                                       : (width - imageWidth) / 2;
+            // 而本模组拿不到真实 leftPos（26.2 没有公开的几何访问口），只能按「界面水平居中」估算外框，
+            // 于是竖栏 rightX = guiX + guiW + MARGIN 正好压在被右移的真实物品栏上（issue #3 BUG2 的截图）。
+            // 这类界面对标签栏也没有用处（工作方块不在整理目标里，标签主要给箱子打），
+            // 所以干脆不显示 —— 与其猜坐标，不如不画。
+            if (screen instanceof AbstractRecipeBookScreen<?>) {
                 return;
             }
             Minecraft mc = Minecraft.getInstance();

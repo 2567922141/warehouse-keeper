@@ -14,6 +14,7 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -151,6 +152,13 @@ public class WarehouseScreen extends Screen {
      * 两处共用同一套实现：一个按钮 + 一份展开的、可滚动的候选清单（弹出层，画在最上面）。
      */
     private Dropdown pickDd;
+    /**
+     * 取货页的「分类：」筛选下拉（与仓库下拉同一套实现，第 0 项固定是空串 = 全部分类）。
+     *
+     * <p>候选按当前**取货范围里真有的**物品现算（{@link #pickCatKeys()}），不依赖按需查询通道 ——
+     * 老服务端上 {@link #catList()} 只剩「全部分类」一项，这个下拉也照样能用。
+     */
+    private Dropdown pickCatDd;
     private Dropdown taskDd;
     /** 「搬运工」页「整理」子页里那行仓库选择器（按钮铺满整行） */
     private R taskRow;
@@ -300,6 +308,13 @@ public class WarehouseScreen extends Screen {
     private String boxEnchText = "";
     /** 服务端太旧、没有按需查询通道时的提示（四页共用一句话） */
     private static final String QUERY_UNSUPPORTED = "当前服务器不支持面板查询（服务端版本较旧）。";
+    /**
+     * 搬运工显示名的长度上限 —— **必须和服务端一致**（{@code WarehouseCommand.botDisplay} 里是 24）。
+     *
+     * <p>1.1.2 · 优化1：以前输入框是 32，服务端只收 24，写长了会被服务端拒掉，
+     * 而面板当时已经先写了「已把…设为…」的成功文案，玩家就以为设好了 → 表现为「改名没同步」。
+     */
+    private static final int DISPLAY_NAME_MAX = 24;
 
     private EditBox nameBox;
     private EditBox countBox;
@@ -565,6 +580,9 @@ public class WarehouseScreen extends Screen {
         if (catDd != null) {
             catDd.releaseDrag();
         }
+        if (pickCatDd != null) {
+            pickCatDd.releaseDrag();
+        }
     }
 
     private void clearTabRegions() {
@@ -606,6 +624,9 @@ public class WarehouseScreen extends Screen {
         boxEnchBox = null;
         if (catDd != null) {
             catDd.close();
+        }
+        if (pickCatDd != null) {
+            pickCatDd.close();
         }
         rowH = 0;
         assignRow = null;
@@ -810,6 +831,9 @@ public class WarehouseScreen extends Screen {
         }
         if (pickDd != null) {
             pickDd.layout();
+        }
+        if (pickCatDd != null) {
+            pickCatDd.layout();
         }
     }
 
@@ -1667,8 +1691,26 @@ public class WarehouseScreen extends Screen {
         if (pickRow != null && !pickRow.empty()) {
             // 仓库改成下拉选择：按钮显示当前仓库，点开就是一份可滚动的仓库清单
             // （比原来点一下轮换一个仓库直观，仓库多的时候也不用点很多次）
-            int btnW = Math.min(112, Math.max(72, pickRow.w() * 28 / 100));
-            int filterW = Math.max(60, pickRow.w() - btnW - GAP);
+            // 1.1.2 · 新功能：这一段变成「筛选框 | 分类 ▾ | 仓库 ▾」三件套 —— 分类下拉只留下想看的那一类
+            // 物品行，展开/滚动/点选与仓库下拉是同一套实现（Dropdown）。
+            int gapSum = GAP * 2;
+            int btnW = Math.min(112, Math.max(64, pickRow.w() * 26 / 100));
+            int catW = Math.min(120, Math.max(56, pickRow.w() * 24 / 100));
+            int filterW = Math.max(40, pickRow.w() - btnW - catW - gapSum);
+            int overflow = filterW + btnW + catW + gapSum - pickRow.w();
+            if (overflow > 0) {
+                // 面板窄到三个控件放不下时：先缩分类按钮、再缩仓库按钮、最后缩筛选框。
+                // 宁可输入框窄，也绝不让它们互相压住（宽度只在这一段算，绘制与命中用同一批矩形）
+                int shrinkCat = Math.min(overflow, Math.max(0, catW - 40));
+                catW -= shrinkCat;
+                overflow -= shrinkCat;
+                if (overflow > 0) {
+                    int shrinkBtn = Math.min(overflow, Math.max(0, btnW - 48));
+                    btnW -= shrinkBtn;
+                    overflow -= shrinkBtn;
+                }
+                filterW = Math.max(32, pickRow.w() - btnW - catW - gapSum);
+            }
             pickQueryBox = new EditBox(this.font, pickRow.x(), pickRow.y() + 1,
                     filterW, Math.max(8, pickRow.h() - 2), Component.literal("筛选"));
             pickQueryBox.setMaxLength(48);
@@ -1680,12 +1722,22 @@ public class WarehouseScreen extends Screen {
                 pickScroll = 0;
             });
             addRenderableWidget(pickQueryBox);
+
+            // ① 仓库下拉（贴在行尾）
             pickDd.btnRect = new R(pickRow.right() - btnW, pickRow.y(), btnW, pickRow.h());
             if (!pickDd.touched) {
                 pickDd.choice = sel + 1;   // 没手动选过：跟着「仓库」页的选中项走
             }
             pickDd.button = btn(pickDd.label(), pickDd.btnRect, b -> pickDd.toggle());
             pickDd.layout();
+
+            // ② 分类下拉（紧挨筛选框右侧；候选取决于上面选中的仓库，所以放在它后面建）
+            pickCatDd = pickCatDd == null ? new Dropdown() : pickCatDd;
+            pickCatDd.prefix = "分类：";
+            syncPickCat();
+            pickCatDd.btnRect = new R(pickRow.x() + filterW + GAP, pickRow.y(), catW, pickRow.h());
+            pickCatDd.button = btn(pickCatDd.label(), pickCatDd.btnRect, b -> pickCatDd.toggle());
+            pickCatDd.layout();
         }
         if (orderRow == null || orderRow.empty()) {
             return;
@@ -1810,7 +1862,7 @@ public class WarehouseScreen extends Screen {
             }
             assignNameBox = new EditBox(this.font, assignNameRect.x(), assignNameRect.y() + 1,
                     assignNameRect.w(), Math.max(8, assignNameRect.h() - 2), Component.literal("显示名"));
-            assignNameBox.setMaxLength(32);
+            assignNameBox.setMaxLength(DISPLAY_NAME_MAX);
             assignNameBox.setValue(assignNameDraft);
             rememberHint(assignNameBox, hintFor(assignNameRect.w(), "假人显示名（可中文）", "显示名（可中文）",
                     "显示名", "昵称", ""));
@@ -1832,12 +1884,22 @@ public class WarehouseScreen extends Screen {
                         assignNameBox.setValue("");
                     }
                     run("warehouse bot display " + q(pickBot) + " clear",
-                            "已清除「" + botLabel(pickBot) + "」的显示名（仍显示注册名）");
+                            "已发送：清除「" + botLabel(pickBot) + "」的显示名");
+                    return;
+                }
+                // 1.1.2 · 优化1：本地先按服务端那套规则挡一遍（长度 24 / 不许控制字符与 §），
+                // 免得发出必然被拒的指令、玩家却以为已经设好。
+                if (text.length() > DISPLAY_NAME_MAX) {
+                    status = "显示名最多 " + DISPLAY_NAME_MAX + " 个字符（现在 " + text.length() + " 个）。";
+                    return;
+                }
+                if (badDisplayName(text)) {
+                    status = "显示名不能包含换行、制表符或颜色代码（§）。";
                     return;
                 }
                 // nick 是 greedyString：原文照发，**不加引号**（加了引号会连引号一起存进显示名）
                 run("warehouse bot display " + q(pickBot) + " " + text,
-                        "已把「" + pickBot + "」的显示名设为 " + text);
+                        "已发送：把「" + pickBot + "」的显示名设为 " + text);
             });
         }
         if (assignPick != null && !assignPick.empty()) {
@@ -2482,12 +2544,30 @@ public class WarehouseScreen extends Screen {
      * 所以这里只是把「所有仓库一起看」这件事在界面上做出来，不需要服务端改任何东西。
      */
     private List<ClientSnapshot.Item> pickItems() {
+        // 1.1.2 · 新功能：先按「范围 + 关键字」取一遍（pickItemsRaw），再按分类下拉筛一遍。
+        // 画清单、点行填名字、滚轮算上限都走这一个方法 ——「看到的」和「点得到的」永远同一份列表。
+        List<ClientSnapshot.Item> raw = pickItemsRaw();
+        String cat = pickCatKey();
+        if (cat.isEmpty()) {
+            return raw;
+        }
+        List<ClientSnapshot.Item> out = new ArrayList<>();
+        for (ClientSnapshot.Item it : raw) {
+            if (catMatches(it, cat)) {
+                out.add(it);
+            }
+        }
+        return out;
+    }
+
+    /** 「范围 + 关键字」那一半（分类候选也按同一份范围算，见 {@link #pickCatKeys()}） */
+    private List<ClientSnapshot.Item> pickItemsRaw() {
         String q = pickQuery.trim().toLowerCase(Locale.ROOT);
         if (pickDd == null || pickDd.choice > 0) {
             // 优化10：直接取下拉里那一条的名字（不再依赖 selectedRegion() 的隐式同步 ——
             // 「仓库」页选「全部仓库」时 selectedRegion() 是空串，而下拉可以仍然指着某个具体仓库）
             String name = pickDd == null ? selectedRegion() : pickDd.entryKey(pickDd.choice);
-            List<ClientSnapshot.Item> all = itemsOf(name);
+            List<ClientSnapshot.Item> all = pickRegionItems(name);
             if (q.isEmpty()) {
                 return all;
             }
@@ -2502,7 +2582,7 @@ public class WarehouseScreen extends Screen {
         Map<String, ClientSnapshot.Item> byKey = new LinkedHashMap<>();
         Map<String, Set<String>> where = new LinkedHashMap<>();
         for (RegionCache.Entry entry : RegionCache.list()) {
-            for (ClientSnapshot.Item it : itemsOf(clean(entry.name))) {
+            for (ClientSnapshot.Item it : pickRegionItems(clean(entry.name))) {
                 if (!matches(it, q)) {
                     continue;
                 }
@@ -2537,6 +2617,109 @@ public class WarehouseScreen extends Screen {
         }
         out.sort((a, b) -> Long.compare(b.count, a.count));
         return out;
+    }
+
+    /** 取货页取数：直接看快照里这个仓库的物品，**不掺**「物品」页的搜索词（那一页有自己的搜索框） */
+    private static List<ClientSnapshot.Item> pickRegionItems(String region) {
+        ClientSnapshot.Region view = ClientSnapshot.find(region);
+        return view == null || view.items == null ? List.of() : view.items;
+    }
+
+    /** 取货页分类下拉选中的键（空串 = 不筛） */
+    private String pickCatKey() {
+        if (pickCatDd == null || pickCatDd.choice <= 0) {
+            return "";
+        }
+        return pickCatDd.entryKey(pickCatDd.choice);
+    }
+
+    /** 这一行物品属不属于当前选的分类（id → {@link Categories#of(String)}）；老服务端没给 id 时不算命中 */
+    private boolean catMatches(ClientSnapshot.Item it, String cat) {
+        if (cat == null || cat.isEmpty()) {
+            return true;
+        }
+        String id = it == null || it.id == null ? "" : it.id;
+        return !id.isEmpty() && cat.equals(Categories.of(id));
+    }
+
+    /**
+     * 取货页分类下拉的候选键：**第 0 项固定是空串**（全部分类），其余是当前取货范围里真有的分类，
+     * 顺序照 {@link Categories#order()}（创造栏页签顺序），认不出的排最后。
+     *
+     * <p>只看「范围」、不看关键字：这样打字时下拉不会一行行跳，选中的那一类也不会凭空消失
+     * （真被筛空了清单会显示 0 种，玩家自己能看出来）。
+     */
+    private List<String> pickCatKeys() {
+        Set<String> seen = new LinkedHashSet<>();
+        if (pickDd == null || pickDd.choice > 0) {
+            String name = pickDd == null ? selectedRegion() : pickDd.entryKey(pickDd.choice);
+            collectCats(ClientSnapshot.find(clean(name)), seen);
+        } else {
+            for (RegionCache.Entry entry : RegionCache.list()) {
+                collectCats(ClientSnapshot.find(clean(entry.name)), seen);
+            }
+        }
+        List<String> order = Categories.order();
+        List<String> rest = new ArrayList<>(seen);
+        rest.sort(Comparator.comparingInt((String k) -> {
+            int i = order.indexOf(k);
+            return i < 0 ? Integer.MAX_VALUE : i;
+        }));
+        List<String> out = new ArrayList<>(rest.size() + 1);
+        out.add("");
+        out.addAll(rest);
+        return out;
+    }
+
+    /**
+     * 把一个仓库快照里的物品折成分类键丢进 {@code out}。
+     *
+     * <p>刻意**不走** {@link #itemsOf(String)}：那个是「物品」页的取数口，会按「物品」页的搜索词过滤、
+     * 还只有一格缓存（这里要按仓库连着问，会把缓存冲掉）。分类候选只该由「取货范围」决定。
+     */
+    private static void collectCats(ClientSnapshot.Region view, Set<String> out) {
+        if (view == null || view.items == null) {
+            return;
+        }
+        for (ClientSnapshot.Item it : view.items) {
+            if (it != null && it.id != null && !it.id.isEmpty()) {
+                String key = Categories.of(it.id);
+                if (key != null && !key.isEmpty()) {
+                    out.add(key);
+                }
+            }
+        }
+    }
+
+    /** 分类下拉的显示列：哨兵 → 「全部分类」，其余 → 中文分类名（与键一一对应） */
+    private static List<String> pickCatLabels(List<String> keys) {
+        List<String> out = new ArrayList<>(keys.size());
+        for (String k : keys) {
+            out.add(k.isEmpty() ? "全部分类" : Categories.displayName(k));
+        }
+        return out;
+    }
+
+    /**
+     * 把分类下拉的候选同步成 {@link #pickCatKeys()}，并按**键**保住当前选中项：
+     * 键还在就跟着挪下标（候选的顺序/数量会随仓库变），键没了（换到别的仓库、那一类一件都没有）
+     * 就回到「全部分类」—— 免得下标悄悄指到另一个分类，玩家以为还在按原来那一类筛。
+     */
+    private void syncPickCat() {
+        if (pickCatDd == null) {
+            return;
+        }
+        List<String> keys = pickCatKeys();
+        if (keys.equals(pickCatDd.entries)) {
+            return;
+        }
+        String keep = pickCatDd.entryKey(pickCatDd.choice);
+        pickCatDd.entries = keys;
+        pickCatDd.labels = pickCatLabels(keys);
+        int idx = keep == null || keep.isEmpty() ? 0 : keys.indexOf(keep);
+        pickCatDd.choice = Math.max(0, idx);
+        pickCatDd.clamp();
+        pickCatDd.refreshButton();
     }
 
     /**
@@ -3121,6 +3304,22 @@ public class WarehouseScreen extends Screen {
             sb.append(c);
         }
         return sb.toString().trim();
+    }
+
+    /**
+     * 显示名里有没有服务端一定会拒的字符（{@code WarehouseCommand.botDisplay} 的同一套判据）：
+     * 换行/制表符这类控制字符会打乱面板排版，{@code §} 颜色代码会让按字符截断的宽度算不准。
+     *
+     * <p>{@link #clean(String)} 已经剥掉了 {@code \n \r \t}，这里只是把剩下的控制字符和 {@code §} 也挡在本地。
+     */
+    private static boolean badDisplayName(String text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c < 0x20 || c == 0x7F || c == '§') {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -4869,8 +5068,12 @@ public class WarehouseScreen extends Screen {
     /** 第 1 页「取货」：从当前仓库里挑一样东西，或者自己写名字，点取货让搬运工送来 */
     private void drawPick(GuiGraphicsExtractor g, int mouseX, int mouseY) {
         String region = pickScope();
+        // 分类候选跟着「仓库 / 取货范围」实时刷（下拉展开时也一致），再按选中的分类筛清单
+        syncPickCat();
         List<ClientSnapshot.Item> items = pickItems();
-        String tail = pickQuery.isBlank() ? "" : "（筛选「" + pickQuery + "」）";
+        String cat = pickCatKey();
+        String tail = (pickQuery.isBlank() ? "" : "（筛选「" + pickQuery + "」）")
+                + (cat.isEmpty() ? "" : "（分类：" + catLabel(cat) + "）");
         textCenter(g, pickCap, region + " 里有 " + items.size() + " 种物品" + tail, 0xFF8FA0B8);
         if (pickBox == null || pickBox.empty()) {
             return;
@@ -4941,8 +5144,9 @@ public class WarehouseScreen extends Screen {
                                 "×" + it.count, 0xFF9FB3CC);
                     }
                     if (items.isEmpty()) {
-                        String empty = region.equals("全部仓库") ? "所有仓库里都没有物品"
-                                : region.equals("未选仓库") ? "请先到「仓库」页选择一个仓库" : "仓库内暂无物品";
+                        String empty = region.equals("未选仓库") ? "请先到「仓库」页选择一个仓库"
+                                : (!pickQuery.isBlank() || !cat.isEmpty()) ? "没有符合当前筛选的物品"
+                                : region.equals("全部仓库") ? "所有仓库里都没有物品" : "仓库内暂无物品";
                         textIn(gg, new R(pickBox.x() + 6, pickBox.y() + LINE_H + 8,
                                         Math.max(0, pickBox.w() - 12), LINE_H),
                                 empty, 0xFF93A3B8);
@@ -5287,6 +5491,10 @@ public class WarehouseScreen extends Screen {
             // 「物品」页的分类下拉：画在控件之上
             catDd.draw(g, mouseX, mouseY);
         }
+        if (pickCatDd != null && pickCatDd.open) {
+            // 「取货」页的分类下拉：同一套画法
+            pickCatDd.draw(g, mouseX, mouseY);
+        }
         if (pickDd != null && pickDd.open) {
             pickDd.draw(g, mouseX, mouseY);
         }
@@ -5367,6 +5575,16 @@ public class WarehouseScreen extends Screen {
         if (ev.button() == 0 && pickDd != null && pickDd.open && pickDd.click(ev.x(), ev.y())) {
             // 「取货」页的仓库下拉展开着：点条目就换范围，点别处就收起来（两种情况都吃掉这次点击）
             return true;
+        }
+        if (ev.button() == 0 && pickCatDd != null && pickCatDd.open) {
+            // 「取货」页的分类下拉：选中条目才重排清单（第 0 条 = 全部分类）；点别处只是收起来
+            int before = pickCatDd.choice;
+            if (pickCatDd.click(ev.x(), ev.y())) {
+                if (pickCatDd.choice != before) {
+                    pickScroll = 0;
+                }
+                return true;
+            }
         }
         if (ev.button() == 0 && taskDd != null && taskDd.open && taskDd.click(ev.x(), ev.y())) {
             // 「整理」页的仓库下拉同理
@@ -5588,6 +5806,13 @@ public class WarehouseScreen extends Screen {
             }
             return true;
         }
+        if (pickCatDd != null && pickCatDd.open) {
+            // 「取货」页的分类下拉展开着：同上
+            if (pickCatDd.scrollBy(x, y, dy)) {
+                return true;
+            }
+            return true;
+        }
         if (pickOpen) {
             // 展开的仓库清单滚动（条目多于可见行时才有意义）
             if (assignList != null && assignList.holds(x, y)) {
@@ -5696,6 +5921,9 @@ public class WarehouseScreen extends Screen {
         if (catDd != null && catDd.open && catDd.dragTo(my)) {
             return true;
         }
+        if (pickCatDd != null && pickCatDd.open && pickCatDd.dragTo(my)) {
+            return true;
+        }
         // 只看几何：谁在这一帧被按下了（drag == true）就归谁；没被按下的拖不动，
         // 所以这里不需要再按页分派（按页分派会漏掉「仓库列表在箱子页/取货页」这类组合）。
         int v;
@@ -5744,6 +5972,9 @@ public class WarehouseScreen extends Screen {
         }
         if (catDd != null) {
             catDd.releaseDrag();
+        }
+        if (pickCatDd != null) {
+            pickCatDd.releaseDrag();
         }
         sbRegions.release();
         sbInfo.release();
@@ -5800,7 +6031,7 @@ public class WarehouseScreen extends Screen {
             return true;
         }
         if (ev.key() == 256 && ((pickDd != null && pickDd.open) || (taskDd != null && taskDd.open)
-                || (catDd != null && catDd.open))) {
+                || (catDd != null && catDd.open) || (pickCatDd != null && pickCatDd.open))) {
             // 页内的仓库/分类下拉：Esc 先收下拉，不退出界面
             if (pickDd != null) {
                 pickDd.close();
@@ -5810,6 +6041,9 @@ public class WarehouseScreen extends Screen {
             }
             if (catDd != null) {
                 catDd.close();
+            }
+            if (pickCatDd != null) {
+                pickCatDd.close();
             }
             return true;
         }

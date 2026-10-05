@@ -25,6 +25,7 @@ import net.minecraft.world.level.chunk.status.ChunkStatus;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -182,13 +183,18 @@ public final class Porter {
                 query = query.substring(0, hash).trim();
             }
         }
-        WarehouseIndex.ItemEntry entry = resolve(query);
-        if (entry == null) {
+        Resolved hit = resolveEx(query);
+        if (hit.entry == null) {
+            // 1.1.2 · BUG1：命中多种物品时不再「挑库存最多的那个」，而是当场说清并让玩家指明
+            if (hit.problem != null) {
+                return hit.problem;
+            }
+            String shown = query == null ? "" : query;
             return WarehouseMod.INDEX.items.isEmpty()
                     ? "仓库索引为空，请先执行 /warehouse scan。"
-                    : "仓库中没有「" + query + "」这件物品。";
+                    : "仓库中没有「" + shown + "」这件物品。";
         }
-        return enqueue(player.getName().getString(), player.getUUID(), entry, count, ench);
+        return enqueue(player.getName().getString(), player.getUUID(), hit.entry, count, ench);
     }
 
     /** 网页下单：物品名由 tick 线程解析（HTTP 线程不碰可变的索引） */
@@ -229,33 +235,113 @@ public final class Porter {
         return null;
     }
 
-    /** 把一个玩家输入解析成索引里的某个物品（完全照搬 /warehouse find 的规则） */
-    public static WarehouseIndex.ItemEntry resolve(String query) {
-        if (query == null || query.isBlank()) {
-            return null;
+    /** 命中多种物品时，最多列几个候选给玩家看（和 {@code /warehouse find} 的口径一致） */
+    private static final int MAX_HINT = 10;
+
+    /**
+     * 解析结论：要么唯一命中（{@link #entry}），要么带一句给玩家看的原因（{@link #problem}）。
+     *
+     * <p>1.1.2 · BUG1：以前的解析只有「id 精确 + 子串包含」两层，而中文永远不是合法 id，
+     * 于是「石头」这种输入只能走子串分支，再按**库存最多**挑一个 —— 仓库里没有石头时，
+     * 唯一剩下的候选就是「平滑石头」，于是整单取错东西。
+     * 现在改成三段，且只认唯一命中：
+     * <ol>
+     *   <li>id 精确（{@code stone} / {@code minecraft:stone}）</li>
+     *   <li>名字精确：显示名 / 实时名字 / id 路径 三者任一 equalsIgnoreCase（唯一才认）</li>
+     *   <li>子串包含（唯一才认）</li>
+     * </ol>
+     * 命中多种一律拒绝并列候选 —— 宁可回「没有这件物品」，也不替玩家猜。
+     */
+    public static final class Resolved {
+        /** 唯一命中的条目；null = 没能唯一确定 */
+        public final WarehouseIndex.ItemEntry entry;
+        /** entry 为 null 时给玩家看的原因；null = 按「索引为空 / 没有这件物品」兜底 */
+        public final String problem;
+
+        private Resolved(WarehouseIndex.ItemEntry entry, String problem) {
+            this.entry = entry;
+            this.problem = problem;
         }
+    }
+
+    /** 只要「有没有唯一命中」的调用方用这个 */
+    public static WarehouseIndex.ItemEntry resolve(String query) {
+        return resolveEx(query).entry;
+    }
+
+    /** 三段式解析（精确 → 名字精确 → 唯一模糊），详见 {@link Resolved} */
+    public static Resolved resolveEx(String query) {
+        if (query == null || query.isBlank()) {
+            return new Resolved(null, null);
+        }
+        // ① id 精确
         String id = ItemIds.resolve(query);
         if (id != null) {
-            WarehouseIndex.ItemEntry e = WarehouseMod.INDEX.items.get(id);
-            if (e != null) {
-                return e;
+            WarehouseIndex.ItemEntry byId = WarehouseMod.INDEX.items.get(id);
+            if (byId != null) {
+                return new Resolved(byId, null);
+            }
+            // 输入本身就是一个**合法物品 id**（例如 stone、minecraft:stone），但索引里没有它 ——
+            // 玩家点名的就是这件东西，仓库里没有 ⇒ 直接说没有，绝不拿「名字/ id 里含这个词」的
+            // 别的物品顶包（例如用 stone 命中 smooth_stone）。这条也是「没存货也不乱取」的兜底。
+            return new Resolved(null, null);
+        }
+        String q = query.trim();
+        // ② 名字精确
+        List<WarehouseIndex.ItemEntry> named = new ArrayList<>();
+        for (WarehouseIndex.ItemEntry e : WarehouseMod.INDEX.items.values()) {
+            if (isExactName(e, q)) {
+                named.add(e);
             }
         }
-        String q = query.trim().toLowerCase(Locale.ROOT);
-        WarehouseIndex.ItemEntry best = null;
+        if (named.size() == 1) {
+            return new Resolved(named.get(0), null);
+        }
+        if (named.size() > 1) {
+            return new Resolved(null, ambiguous(q, named));
+        }
+        // ③ 子串包含
+        String lower = q.toLowerCase(Locale.ROOT);
+        List<WarehouseIndex.ItemEntry> hits = new ArrayList<>();
         for (WarehouseIndex.ItemEntry e : WarehouseMod.INDEX.items.values()) {
             // displayName 是建索引时算好的：专用服务端的 Language 多半是 en_us，那时还没有客户端推来的名字表，
             // 所以缓存里是英文名 —— 中文搜索必须再用 Names.item() 实时取一次（它会优先查客户端推的名字）。
             String live = Names.item(e.itemId);
-            if (e.itemId.toLowerCase(Locale.ROOT).contains(q)
-                    || e.displayName.toLowerCase(Locale.ROOT).contains(q)
-                    || live.toLowerCase(Locale.ROOT).contains(q)) {
-                if (best == null || e.total > best.total) {
-                    best = e;
-                }
+            if (e.itemId.toLowerCase(Locale.ROOT).contains(lower)
+                    || e.displayName.toLowerCase(Locale.ROOT).contains(lower)
+                    || live.toLowerCase(Locale.ROOT).contains(lower)) {
+                hits.add(e);
             }
         }
-        return best;
+        if (hits.size() == 1) {
+            return new Resolved(hits.get(0), null);
+        }
+        if (hits.size() > 1) {
+            return new Resolved(null, ambiguous(q, hits));
+        }
+        return new Resolved(null, null);
+    }
+
+    /** 输入是不是这个条目的**完整**名字（中文显示名 / 实时名字 / 去掉命名空间的 id） */
+    private static boolean isExactName(WarehouseIndex.ItemEntry e, String q) {
+        return q.equalsIgnoreCase(e.displayName)
+                || q.equalsIgnoreCase(Names.item(e.itemId))
+                || q.equalsIgnoreCase(ItemIds.path(e.itemId));
+    }
+
+    /** 命中多种时的提示：按库存从多到少列前 {@value #MAX_HINT} 个候选，并给出可直接复制的 id */
+    private static String ambiguous(String query, List<WarehouseIndex.ItemEntry> hits) {
+        hits.sort(Comparator.comparingLong((WarehouseIndex.ItemEntry e) -> e.total).reversed());
+        StringBuilder sb = new StringBuilder("「" + query + "」在仓库中有 " + hits.size()
+                + " 种可能的物品，请用完整名字或 id 指定：");
+        for (int i = 0; i < Math.min(MAX_HINT, hits.size()); i++) {
+            WarehouseIndex.ItemEntry e = hits.get(i);
+            sb.append("  ").append(e.displayName).append('(').append(e.itemId).append(')');
+        }
+        if (hits.size() > MAX_HINT) {
+            sb.append("  …等 ").append(hits.size()).append(" 种");
+        }
+        return sb.toString();
     }
 
     // ------------------------------------------------------------------
@@ -707,14 +793,16 @@ public final class Porter {
     private static void drainIncoming() {
         Request r;
         while ((r = INCOMING.poll()) != null) {
-            WarehouseIndex.ItemEntry entry = resolve(r.query());
-            if (entry == null) {
-                reject(r, WarehouseMod.INDEX.items.isEmpty()
+            Resolved hit = resolveEx(r.query());
+            if (hit.entry == null) {
+                // 命中多种物品时把候选清单也带给网页端（reject 会写进订单历史里）
+                reject(r, hit.problem != null ? hit.problem
+                        : WarehouseMod.INDEX.items.isEmpty()
                         ? "仓库索引为空，请先在游戏内执行 /warehouse scan。"
                         : "仓库中没有「" + r.query() + "」这件物品。");
                 continue;
             }
-            String err = enqueue(r.playerName(), null, entry, r.count(), "");
+            String err = enqueue(r.playerName(), null, hit.entry, r.count(), "");
             if (err != null) {
                 reject(r, err);
             }

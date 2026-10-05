@@ -311,6 +311,28 @@ public final class ClientSnapshot {
         return bots;
     }
 
+    /**
+     * 按**注册名**找这个搬运工设的显示名；没有装显示名（或快照里没有这个人）时返回 {@code null}。
+     *
+     * <p>1.1.2 · 优化2：拿它去替换游戏里画出来的玩家名（见 {@code mixin.PlayerDisplayNameMixin}）——
+     * 原版玩家名牌 = 记分板队伍装饰 + 档案名，{@code setCustomName} 对它无效，
+     * 所以服务端改不了名字，只能在客户端显示这一层换。
+     *
+     * <p>返回 null（而不是空串）是为了让调用方一眼分辨「没得换」和「换成了空」。
+     */
+    public static String displayNameOf(String name) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        for (Bot b : bots) {
+            if (b == null || !name.equals(b.name)) {
+                continue;
+            }
+            return b.display == null || b.display.isEmpty() ? null : b.display;
+        }
+        return null;
+    }
+
     /** 箱子标签（批次 3）：游戏内标签栏按坐标查，网页面板按 key 查 */
     public static List<Tag> tags() {
         return tags;

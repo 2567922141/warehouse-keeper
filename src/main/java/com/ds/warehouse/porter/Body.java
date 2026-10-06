@@ -18,6 +18,7 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.ChestBlock;
@@ -250,7 +251,9 @@ public final class Body {
     public static void swing(MinecraftServer server, String name) {
         ServerPlayer bot = get(server, name);
         if (bot != null) {
-            bot.swing(InteractionHand.MAIN_HAND);
+            // 26.3：挥手动画被参数化 —— swing(InteractionHand, SwingAnimation, boolean)。
+            // 第三个参数取 true，才与 26.2 的老语义完全一致（26.2 的 swing(hand) 内部就是 swing(hand, true)）。
+            bot.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
         }
     }
 

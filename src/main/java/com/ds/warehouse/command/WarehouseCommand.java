@@ -826,8 +826,12 @@ public final class WarehouseCommand {
             send(src, Bots.list().isEmpty()
                     ? noBotsYet("porter", false)
                     : "没有可用的搬运工：均忙碌，或未分配值守仓库（用 /warehouse bot assign <搬运工> <仓库> 指定）。");
+            sendDispatchBlockers(src, region);
             return 0;
         }
+        // 派单前先点名：此刻还没开工的人，就是这次上不了工的人。
+        // （放在派单**之后**点名会把刚上工的人也算进去，回执就自相矛盾了）
+        sendDispatchBlockers(src, region);
         int started = 0;
         // 同一条失败原因只说一次：清扫下线之类「全员都会失败」的节点不该按人数刷屏
         Set<String> said = new LinkedHashSet<>();
@@ -925,6 +929,45 @@ public final class WarehouseCommand {
             out.add(e);
         }
         return out;
+    }
+
+    /**
+     * 点名「这次派单范围内、但没上工」的搬运工及原因（1.1.4 · 优化8）。
+     *
+     * <p>以前 {@link #freeBots(String)} 是**静默过滤**：玩家给同一间仓库派了几个假人，结果只有一个在动，
+     * 甚至一个都不动，回执里也看不出为什么。这里把被过滤掉的人和原因一并报出来（只报范围内的，
+     * 指定仓库时值守别的仓库的假人不算漏派）。
+     */
+    private static void sendDispatchBlockers(CommandSourceStack src, String region) {
+        List<String> out = new ArrayList<>();
+        for (Bots.Entry e : Bots.list()) {
+            String r = e.region == null ? "" : e.region;
+            if (!region.isEmpty() && !region.equals(r)) {
+                continue;
+            }
+            String why = null;
+            if (Tasks.busy(e.name)) {
+                why = "正在执行「" + Tasks.kindOf(e.name) + "」";
+            } else if (Porter.busyWithOrder(e.name)) {
+                why = "正在配送订单";
+            } else if (Bots.isRecalled(e.name)) {
+                why = "已被收回（歇班），可在面板点「上岗」";
+            } else if (r.isEmpty()) {
+                why = "还没分配值守仓库";
+            } else if (RegionStore.REGIONS.get(r) == null) {
+                why = "值守的仓库「" + r + "」已不存在";
+            }
+            if (why != null) {
+                out.add(e.name + "（" + why + "）");
+            }
+        }
+        if (out.isEmpty()) {
+            return;
+        }
+        // 人多了别刷屏：最多点 6 个名字，剩下的只说个数
+        int shown = Math.min(out.size(), 6);
+        send(src, "这次没上工的 " + out.size() + " 名：" + String.join("、", out.subList(0, shown))
+                + (out.size() > shown ? " 等" : "") + "。");
     }
 
     /** {@code /warehouse porter stop} —— 令所有假人停止当前任务 */
@@ -1317,7 +1360,12 @@ public final class WarehouseCommand {
             send(src, "用法：/warehouse order <物品名> [数量]");
             return 0;
         }
-        count = Math.max(1, Math.min(count, Porter.MAX_ORDER));
+        // 1.1.4 · 与严格库存语义一致：超过单次上限不再静默压成上限，而是明确拒绝
+        if (count > Porter.MAX_ORDER) {
+            send(src, "一次最多下单 " + Porter.MAX_ORDER + " 个（你说了 " + count + " 个），没有下单。");
+            return 0;
+        }
+        count = Math.max(1, count);
         String err = Porter.request(player, query, count);
         if (err != null) {
             send(src, err);

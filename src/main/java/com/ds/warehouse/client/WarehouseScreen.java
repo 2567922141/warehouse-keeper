@@ -4,6 +4,10 @@ import com.ds.warehouse.WarehouseMod;
 import com.ds.warehouse.net.ViewQueryPayload;
 import com.ds.warehouse.util.Categories;
 import com.google.gson.JsonObject;
+// 26.3：窗口/输入从 GLFW 换成 SDL3 —— 鼠标左键不再是 0（GLFW 编号），Esc 也不再是 256，
+// 改用下面这些具名常量（原版 AbstractWidget.isValidClickButton / InputWithModifiers.isEscape
+// 用的就是同一套编号）。老写法在 26.3 上不会报错，只会让手写的命中判定静默失效。
+import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
@@ -3039,6 +3043,11 @@ public class WarehouseScreen extends Screen {
             return;
         }
         int amount = parseOrderCount();
+        if (amount < 0) {
+            // 1.1.4 · 超上限不再静默压成 4096，而是像服务端一样明确说一句
+            status = "一次最多下单 4096 个（你填了 " + orderCountText.trim() + " 个）。";
+            return;
+        }
         run("warehouse order " + what + " " + amount,
                 "已下单：让搬运工给你取 " + amount + " 个 " + what);
     }
@@ -3304,14 +3313,14 @@ public class WarehouseScreen extends Screen {
         }
     }
 
-    /** 取货数量：默认 1，最多 4096（和服务端的 MAX_ORDER 一致）。 */
+    /** 取货数量：默认 1，最多 4096（和服务端的 MAX_ORDER 一致）；超上限返回 -1，由调用方提示。 */
     private int parseOrderCount() {
         try {
             int value = Integer.parseInt(orderCountText.trim());
             if (value < 1) {
                 return 1;
             }
-            return Math.min(value, 4096);
+            return value > 4096 ? -1 : value;
         } catch (Exception ex) {
             return 1;
         }
@@ -5596,7 +5605,7 @@ public class WarehouseScreen extends Screen {
     public boolean mouseClicked(MouseButtonEvent ev, boolean doubleClick) {
         // 确认框开着的时候，只认它自己的两个按钮，别的点击一律吃掉
         if (pending != null) {
-            if (ev.button() == 0) {
+            if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT) {
                 if (okBtn != null && okBtn.holds(ev.x(), ev.y())) {
                     Runnable action = pending;
                     pending = null;
@@ -5610,11 +5619,11 @@ public class WarehouseScreen extends Screen {
             }
             return true;
         }
-        if (ev.button() == 0 && pickDd != null && pickDd.open && pickDd.click(ev.x(), ev.y())) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && pickDd != null && pickDd.open && pickDd.click(ev.x(), ev.y())) {
             // 「取货」页的仓库下拉展开着：点条目就换范围，点别处就收起来（两种情况都吃掉这次点击）
             return true;
         }
-        if (ev.button() == 0 && pickCatDd != null && pickCatDd.open) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && pickCatDd != null && pickCatDd.open) {
             // 「取货」页的分类下拉：选中条目才重排清单（第 0 条 = 全部分类）；点别处只是收起来
             int before = pickCatDd.choice;
             if (pickCatDd.click(ev.x(), ev.y())) {
@@ -5624,11 +5633,11 @@ public class WarehouseScreen extends Screen {
                 return true;
             }
         }
-        if (ev.button() == 0 && taskDd != null && taskDd.open && taskDd.click(ev.x(), ev.y())) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && taskDd != null && taskDd.open && taskDd.click(ev.x(), ev.y())) {
             // 「整理」页的仓库下拉同理
             return true;
         }
-        if (ev.button() == 0 && catDd != null && catDd.open) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && catDd != null && catDd.open) {
             // 「物品」页的分类下拉：选中条目才按新分类重查（第 0 条 = 全部分类）；点别处只是收起来
             int before = catDd.choice;
             if (catDd.click(ev.x(), ev.y())) {
@@ -5640,12 +5649,12 @@ public class WarehouseScreen extends Screen {
                 return true;
             }
         }
-        if (ev.button() == 0 && clickScrollBar(ev.x(), ev.y())) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && clickScrollBar(ev.x(), ev.y())) {
             // 0.23.0：滚动条画在所有内容之上，命中判定也必须排在「行区通吃」的页面分支前面 ——
             // 否则像「权限→审计」那样「行区里的点击一律吃掉」的分支会先把点击吞掉，滑块永远拖不动。
             return true;
         }
-        if (ev.button() == 0 && tab == 3 && sub == 1 && admin) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && tab == 3 && sub == 1 && admin) {
             // 「权限 → 审计」子页：行区/说明区里的点击一律吃掉（翻页按钮也画在这两块里），
             // 免得落到下面的行或列表上；页签不在这两块里，不会被误吃。
             boolean inArea = (rowsBox != null && rowsBox.holds(ev.x(), ev.y()))
@@ -5659,7 +5668,7 @@ public class WarehouseScreen extends Screen {
                 return true;
             }
         }
-        if (ev.button() == 0 && pickOpen) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && pickOpen) {
             // 仓库清单展开着：点条目就选中它，点别处就收起来（两种情况都吃掉这次点击）
             List<RegionCache.Entry> list = RegionCache.list();
             if (assignList != null && assignList.holds(ev.x(), ev.y())) {
@@ -5675,7 +5684,7 @@ public class WarehouseScreen extends Screen {
             rebuildWidgets();
             return true;
         }
-        if (ev.button() == 0) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT) {
             // 先看页签：点中就切页（切页 = 重新 init 一次，只建当前页的控件）
             int hit = tabAt(ev.x(), ev.y());
             if (hit >= 0) {
@@ -5693,7 +5702,7 @@ public class WarehouseScreen extends Screen {
                 return true;
             }
         }
-        if (ev.button() == 0 && tab == 2 && admin && rowsBox != null && !rowsBox.empty() && rowH > 0) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && tab == 2 && admin && rowsBox != null && !rowsBox.empty() && rowH > 0) {
             // 点一行的文字部分 = 选中这个搬运工（行里的三个按钮由控件自己处理）
             List<ClientSnapshot.Bot> bots = ClientSnapshot.bots();
             int visible = rowsVisible(rowsBox, rowH);
@@ -5712,7 +5721,7 @@ public class WarehouseScreen extends Screen {
                 }
             }
         }
-        if (ev.button() == 0 && tab == 0 && listBox != null && !listBox.empty()) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && tab == 0 && listBox != null && !listBox.empty()) {
             List<RegionCache.Entry> list = RegionCache.list();
             int rows = Math.max(1, rowsVisible(listBox, regionRowH));
             int total = list.size() + 1;   // 第 0 行是合成的「全部仓库」
@@ -5747,7 +5756,7 @@ public class WarehouseScreen extends Screen {
                 }
             }
         }
-        if (ev.button() == 0 && QueryClient.supported() && tab == 0 && "物品".equals(subName())
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && QueryClient.supported() && tab == 0 && "物品".equals(subName())
                 && itemDetailKey.isEmpty() && infoBox != null && !infoBox.empty()) {
             // 点物品行 = 进「物品详情」（kind=3）
             List<JsonObject> rowsAll = QueryClient.arr(QueryClient.raw(ViewQueryPayload.KIND_ITEMS), "items");
@@ -5769,7 +5778,7 @@ public class WarehouseScreen extends Screen {
                 }
             }
         }
-        if (ev.button() == 0 && QueryClient.supported() && tab == 0 && "箱子".equals(subName())
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && QueryClient.supported() && tab == 0 && "箱子".equals(subName())
                 && boxDetailKey.isEmpty() && boxBox != null && !boxBox.empty()) {
             // 点箱子行 = 进「容器详情」（kind=5）
             List<JsonObject> boxes = boxRowsQuery(QueryClient.raw(ViewQueryPayload.KIND_CONTAINERS));
@@ -5791,7 +5800,7 @@ public class WarehouseScreen extends Screen {
                 }
             }
         }
-        if (ev.button() == 0 && tab == 1 && pickBox != null && !pickBox.empty()) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && tab == 1 && pickBox != null && !pickBox.empty()) {
             // 点清单里的一行 = 把物品名填进上面的框（不用手打）
             List<ClientSnapshot.Item> items = pickItems();
             int rows = pickRows();
@@ -6025,7 +6034,7 @@ public class WarehouseScreen extends Screen {
 
     @Override
     public boolean mouseDragged(MouseButtonEvent ev, double dragX, double dragY) {
-        if (ev.button() == 0 && dragScrollBar(ev.y())) {
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && dragScrollBar(ev.y())) {
             return true;
         }
         return super.mouseDragged(ev, dragX, dragY);
@@ -6063,12 +6072,12 @@ public class WarehouseScreen extends Screen {
     public boolean keyPressed(KeyEvent ev) {
         if (pending != null) {
             // Esc = 取消；其它按键一概不透传，免得回车/空格把底下的按钮也按了
-            if (ev.key() == 256) {
+            if (ev.key() == InputConstants.KEY_ESCAPE) {
                 cancelAsk();
             }
             return true;
         }
-        if (ev.key() == 256 && ((pickDd != null && pickDd.open) || (taskDd != null && taskDd.open)
+        if (ev.key() == InputConstants.KEY_ESCAPE && ((pickDd != null && pickDd.open) || (taskDd != null && taskDd.open)
                 || (catDd != null && catDd.open) || (pickCatDd != null && pickCatDd.open))) {
             // 页内的仓库/分类下拉：Esc 先收下拉，不退出界面
             if (pickDd != null) {
@@ -6085,7 +6094,7 @@ public class WarehouseScreen extends Screen {
             }
             return true;
         }
-        if (ev.key() == 256 && tab == 0 && (!itemDetailKey.isEmpty() || !boxDetailKey.isEmpty())) {
+        if (ev.key() == InputConstants.KEY_ESCAPE && tab == 0 && (!itemDetailKey.isEmpty() || !boxDetailKey.isEmpty())) {
             // 详情态：Esc 先回列表，不退出界面
             if (!itemDetailKey.isEmpty()) {
                 itemDetailKey = "";
@@ -6104,7 +6113,7 @@ public class WarehouseScreen extends Screen {
             rebuildWidgets();
             return true;
         }
-        if (pickOpen && ev.key() == 256) {
+        if (pickOpen && ev.key() == InputConstants.KEY_ESCAPE) {
             pickOpen = false;
             layoutAssignList();
             rebuildWidgets();

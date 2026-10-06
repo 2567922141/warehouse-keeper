@@ -2,6 +2,10 @@ package com.ds.warehouse.client;
 
 import com.ds.warehouse.config.CategoryRules;
 import com.ds.warehouse.util.Categories;
+// 26.3：窗口/输入从 GLFW 换成 SDL3 —— 鼠标左键不再是 0（GLFW 编号），Esc 也不再是 256，
+// 改用下面这些具名常量（原版 AbstractWidget.isValidClickButton / InputWithModifiers.isEscape
+// 用的就是同一套编号）。老写法在 26.3 上不会报错，只会让手写的命中判定静默失效。
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenKeyboardEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
@@ -296,7 +300,7 @@ public final class ContainerTagBar {
         if (!holder.open) {
             return true;
         }
-        int index = event.button() == 0 ? indexAt(holder, event.x(), event.y()) : -1;
+        int index = event.button() == InputConstants.MOUSE_BUTTON_LEFT ? indexAt(holder, event.x(), event.y()) : -1;
         if (index >= 0) {
             pick(holder, index);
             return false;
@@ -317,7 +321,7 @@ public final class ContainerTagBar {
     }
 
     private static boolean keyList(Holder holder, KeyEvent event) {
-        if (holder.open && event.key() == 256) {
+        if (holder.open && event.key() == InputConstants.KEY_ESCAPE) {
             holder.open = false;
             refresh(holder);
             return false;   // Esc 先收下拉，不要顺手把箱子界面也关了

@@ -16,6 +16,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Prediction;
 import net.minecraft.world.Container;
 import net.minecraft.world.Containers;
 import net.minecraft.world.entity.player.Inventory;
@@ -221,17 +222,22 @@ public final class Porter {
                     + "，但没有假人值守该仓库。请先使用 /warehouse bot assign <假人> " + where.get(0)
                     + " 指定后再下单。";
         }
-        int want = count <= 0 ? 1 : Math.min(count, MAX_ORDER);
-        String clamped = "";
+        // 1.1.4 · 严格库存语义（用户拍板选 A）：
+        // 要的比仓库里的多就**不下单**并明确说明，不再像以前那样静默按库存截断
+        //（以前玩家以为拿了 N 个，实际只拿到库存那么多，与「不足要提示、不得少拿」冲突）。
+        if (count > MAX_ORDER) {
+            return "一次最多下单 " + MAX_ORDER + " 个（你说了 " + count + " 个），没有下单。";
+        }
+        int want = count <= 0 ? 1 : count;
         if (want > entry.total) {
-            want = (int) Math.min(entry.total, MAX_ORDER);
-            clamped = "（仓库中仅剩这些）";
+            return "仓库里「" + entry.displayName + "」只有 " + entry.total + " 个，不够 " + want
+                    + " 个，没有下单。";
         }
         Order o = new Order(playerName, playerId, entry.itemId, entry.displayName, want);
         o.ench = ench == null ? "" : ench;
         PENDING.addLast(o);
-        WarehouseMod.LOGGER.info("[warehouse-keeper] 取货订单: {} 请求 {} 个 {} {}{}", playerName, want,
-                entry.displayName, clamped, ench == null || ench.isEmpty() ? "" : "（附魔 " + ench + "）");
+        WarehouseMod.LOGGER.info("[warehouse-keeper] 取货订单: {} 请求 {} 个 {}{}", playerName, want,
+                entry.displayName, ench == null || ench.isEmpty() ? "" : "（附魔 " + ench + "）");
         return null;
     }
 
@@ -1162,7 +1168,9 @@ public final class Porter {
             }
             delivered += s.getCount();
             // 原版方法：装得下就进背包，装不下的会掉在玩家脚下（不会凭空消失）
-            inv.placeItemBackInInventory(s);
+            // 26.3：这个方法多了 Prediction 参数。这是服务端在改玩家背包，必须 SERVER_ONLY
+            // （PREDICTED 是给客户端预测用的，服务端用它会变成「只改不回」）。
+            inv.placeItemBackInInventory(s, Prediction.SERVER_ONLY);
         }
         target.inventoryMenu.broadcastChanges();
         Body.hold(server, activeBotName, null);

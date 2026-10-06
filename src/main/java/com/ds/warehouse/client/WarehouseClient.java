@@ -14,7 +14,6 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
-import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -54,8 +53,10 @@ public class WarehouseClient implements ClientModInitializer {
 
         openKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
                 "key.warehouse-keeper.open",
-                InputConstants.Type.KEYSYM,
-                GLFW.GLFW_KEY_B,
+                // 26.3：窗口/输入从 GLFW 换成 SDL3 —— KEYSYM 改名 KEYBOARD，键码改用原版自带的常量
+                // （InputConstants.KEY_A…KEY_Z 等）；键位含义与默认键 B 都没变。
+                InputConstants.Type.KEYBOARD,
+                InputConstants.KEY_B,
                 KeyMapping.Category.MISC));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {

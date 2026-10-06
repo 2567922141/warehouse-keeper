@@ -586,11 +586,16 @@ public final class Tasks {
                     idle = "（这个仓库里没有扫到箱子）";
                 } else if (taggedBoxes(j.region) == 0) {
                     idle = "（" + boxes + " 只箱子都没贴标签，假人不知道东西该放哪）";
+                } else if (j.parts > 1) {
+                    // 1.1.4：多假人分工时「本片没活」不等于「整仓没活」，免得被读成「整仓都已就位」
+                    idle = "（本片没活；别的片可能还在干）";
                 } else {
                     idle = "（" + boxes + " 只箱子都已就位，没有要改投的物品）";
                 }
             }
-            return "整理完成：合并 " + j.merged + " 组，归位 " + j.moved + " 件" + detail + "。" + tagged + idle
+            // 1.1.4：多假人分工时把「哪一片」写进报告，玩家一眼就知道这个假人负责的是哪一份
+            String head = j.parts > 1 ? "整理完成（本片第 " + (j.part + 1) + "/" + j.parts + " 片）：" : "整理完成：";
+            return head + "合并 " + j.merged + " 组，归位 " + j.moved + " 件" + detail + "。" + tagged + idle
                     + cost + skip + more + carried + tail;
         }
         // （优化4）现在只剩 TIDY 一种任务；万一将来有别的类型，也给一句不含清扫字样的通用文案
@@ -659,7 +664,9 @@ public final class Tasks {
                     doneInPart++;
                 }
             }
-            return "本片 " + doneInPart + "/" + inPart + " 箱 · 全仓 " + idx + "/" + total + " 箱" + where + eta;
+            // 1.1.4：抢活时可能正在替别人那一片干活，标出来，免得「本片 x/y」看着对不上
+            String help = j.focus != null && !mine(j, j.focus) ? "（在帮别人的片）" : "";
+            return "本片 " + doneInPart + "/" + inPart + " 箱 · 全仓 " + idx + "/" + total + " 箱" + help + where + eta;
         }
         return "已整理 " + idx + "/" + total + " 箱" + where + eta;
     }
@@ -919,28 +926,33 @@ public final class Tasks {
             j.focusIdx = 0;
         }
         List<ContainerRecord> order = tidyOrder(j.region);
-        for (int i = 0; i < order.size(); i++) {
-            ContainerRecord rec = order.get(i);
-            // 判空与同文件 taggedBoxes / tagRank 一个口径：整理顺序里理论上不会有 null，
-            // 但真混进来一条也不该把整轮任务用 NPE 打断（那时会被 catch 吞成「任务莫名中止」）。
-            if (rec == null || rec.pos == null) {
-                continue;
-            }
-            String key = WarehouseIndex.key(rec.dimension, rec.pos);
-            // 1.1.1 多假人分工：不归自己这一片的箱子直接跳过（别人的活不碰）
-            if (!mine(j, key)) {
-                continue;
-            }
-            if (claimedByOther(botName, key)) {
-                // 批次 1 · R14：这口箱子已经有别的假人在整理了，跳过（否则两人会把同一摞搬两次）
-                continue;
-            }
-            Move m = planIn(server, j, rec);
-            if (m != null) {
-                j.focus = key;
-                j.focusIdx = i + 1;
-                claim(botName, key);
-                return m;
+        // 1.1.4 抢活（work stealing）：第 0 趟只碰自己那一片；自己这片全干完了，第 1 趟再去接管
+        // 别人**还没开工**的箱子（已开工的由 CLAIMS 挡着，claimedByOther 会跳过，不会两人搬同一摞）。
+        // 目的：脏活集中在少数几只箱子时，不至于「派了 4 个假人、只有 1 个有活干」。
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < order.size(); i++) {
+                ContainerRecord rec = order.get(i);
+                // 判空与同文件 taggedBoxes / tagRank 一个口径：整理顺序里理论上不会有 null，
+                // 但真混进来一条也不该把整轮任务用 NPE 打断（那时会被 catch 吞成「任务莫名中止」）。
+                if (rec == null || rec.pos == null) {
+                    continue;
+                }
+                String key = WarehouseIndex.key(rec.dimension, rec.pos);
+                // 1.1.1 多假人分工：第 0 趟里不归自己这一片的箱子直接跳过（别人的活先不碰）
+                if (pass == 0 && !mine(j, key)) {
+                    continue;
+                }
+                if (claimedByOther(botName, key)) {
+                    // 批次 1 · R14：这口箱子已经有别的假人在整理了，跳过（否则两人会把同一摞搬两次）
+                    continue;
+                }
+                Move m = planIn(server, j, rec);
+                if (m != null) {
+                    j.focus = key;
+                    j.focusIdx = i + 1;
+                    claim(botName, key);
+                    return m;
+                }
             }
         }
         return null;

@@ -30,13 +30,18 @@ dependencies {
 	// 让 runServer 里也带上 Iron Chests，用来实测
 	// 「instanceof Container + getContainerSize()」这条兼容路径
 	// 对 126 格 / 12 格宽的大箱子是否成立。
-	runtimeOnly "maven.modrinth:cyberanner-ironchest:2.0.8"
+	//
+	// 26.3 线先注释掉：Iron Chests 还没有 26.3 版，它声明的 "~26.2" 会让
+	// Fabric Loader 直接拒绝启动开发环境（runServer/runClient 起不来）。
+	// 等它出 26.3 版，改回版本号并取消注释即可。发布物本来就不含它。
+	// runtimeOnly "maven.modrinth:cyberanner-ironchest:2.0.8"
 
 	// 同样只是开发期运行：Carpet 的 /player 能在无头服务器里造出假玩家，
 	// 这样就能实测「/warehouse region grow <名字>（扩到玩家所在位置）」
 	// 和「/warehouse region merge <名字>（并进 pos1~pos2）」这两条必须
 	// 有真实 ServerPlayer 才能跑的路径。也不进发布 jar。
-	runtimeOnly "maven.modrinth:carpet:26.2"
+	// 26.3 线：Carpet 同样跟到 26.3。
+	runtimeOnly "maven.modrinth:carpet:26.3"
 }
 
 processResources {

@@ -45,13 +45,13 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 
 | 组件 | 版本要求 |
 | --- | --- |
-|warehouse-keeper|1.1.5|
+|warehouse-keeper| 1.1.5 |
 | Minecraft | 26.3 |
 | Fabric Loader | 0.19.5（0.19.3 或更高） |
 | Fabric API | 0.161.0+26.3（或兼容版本） |
 | Java | 25 或更高 |
-| Carpet（可选） | 适配Minecraft26.3|
-|warehouse-keeper-voice（可选）|0.1.0及以上|
+| Carpet（可选） | Carpet Mod 26.3 for Minecraft 26.3 |
+|warehouse-keeper-voice（可选） 0.1.0及以上 |
 
 > **注：**
 >

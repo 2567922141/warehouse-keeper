@@ -43,11 +43,13 @@ Warehouse Keeper 是面向 Minecraft 26.3 的 Fabric 模组，用于集中管理
 
 | 组件 | 版本要求 |
 | --- | --- |
+|warehouse-keeper|1.1.4|
 | Minecraft | 26.3 |
 | Fabric Loader | 0.19.5（0.19.3 或更高） |
 | Fabric API | 0.161.0+26.3（或兼容版本） |
 | Java | 25 或更高 |
 | Carpet（可选） | 26.3，用于生成可见的人形搬运工 |
+注：想要下载适用于Minecraft26.2的版本请选择V1.1.3或更早期版本（https://github.com/2567922141/warehouse-keeper/tree/26.2）。
 
 ## 安装
 

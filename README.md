@@ -50,7 +50,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 的 Fabric 模组，用于集中管理
 | Java | 25 或更高 |
 | Carpet（可选） | 26.3，用于生成可见的人形搬运工 |
 
-注：想要下载适用于Minecraft26.2的版本请选择V1.1.3或更早期版本。[查看26.2分支页面]（https://github.com/2567922141/warehouse-keeper/tree/26.2）
+注：想要下载适用于Minecraft26.2的版本请选择V1.1.3或更早期版本。[查看26.2分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)
 
 ## 安装
 

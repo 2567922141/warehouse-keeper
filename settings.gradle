@@ -13,4 +13,10 @@ rootProject.name = 'warehouse-keeper'
 
 // 可选的语音取货附加包：单独的 jar，只装在想用的人的客户端上。
 // 主体（本工程）不依赖它、也不打包它；不装它主体一切照旧。
-include 'voice'
+//
+// 源码在独立仓库 https://github.com/2567922141/warehouse-keeper-voice
+// 只有把那个仓库 clone 到本工程的 voice/ 目录时，才把它纳入构建；
+// 干净克隆没有这个目录，也不会因为「project directory does not exist」而构建失败。
+if (file('voice/build.gradle').exists()) {
+	include 'voice'
+}

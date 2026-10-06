@@ -2594,6 +2594,10 @@ public class WarehouseScreen extends Screen {
                     row.name = it.name;
                     row.ench = it.ench;
                     row.customName = it.customName;
+                    // 1.1.3：合并行是新建的对象，服务端发来的类目键必须一起带过来。
+                    // 漏掉它的话「按分类筛」在这里会一件都匹配不上：访客客户端回落到
+                    // Categories.of(id) 只会得到「其他」（issue #4 实测：范围=全部仓库、分类=建筑方块 → 0 件）。
+                    row.category = it.category;
                     row.count = 0;
                     row.refs = 0;
                     byKey.put(key, row);
@@ -2633,18 +2637,38 @@ public class WarehouseScreen extends Screen {
         return pickCatDd.entryKey(pickCatDd.choice);
     }
 
-    /** 这一行物品属不属于当前选的分类（id → {@link Categories#of(String)}）；老服务端没给 id 时不算命中 */
+    /** 这一行物品属不属于当前选的分类（见 {@link #itemCat}）；认不出类目时不算命中 */
     private boolean catMatches(ClientSnapshot.Item it, String cat) {
         if (cat == null || cat.isEmpty()) {
             return true;
         }
-        String id = it == null || it.id == null ? "" : it.id;
-        return !id.isEmpty() && cat.equals(Categories.of(id));
+        return cat.equals(itemCat(it));
+    }
+
+    /**
+     * 这一行该算哪个类目。
+     *
+     * <p><b>优先用服务端随快照发来的类目键</b>（1.1.3 起）：取货页在客户端现算，
+     * 而客户端的 {@link Categories#of(String)} 依赖 {@code CreativeOrder} 那张「物品→创造页签」表 ——
+     * 那张表只有服务端建得起来。访客（联机客人 / 专用服玩家）进程里没有 MinecraftServer，
+     * 表是空的 ⇒ 每件物品都被算成「其他」⇒ 分类下拉只剩「全部分类 / 其他」（issue #4）。
+     *
+     * <p>老服务端不发这个字段（空串）时，才回落到本地现算，行为与旧版完全一致。
+     */
+    private static String itemCat(ClientSnapshot.Item it) {
+        if (it == null) {
+            return "";
+        }
+        if (it.category != null && !it.category.isEmpty()) {
+            return it.category;
+        }
+        String id = it.id == null ? "" : it.id;
+        return id.isEmpty() ? "" : Categories.of(id);
     }
 
     /**
      * 取货页分类下拉的候选键：**第 0 项固定是空串**（全部分类），其余是当前取货范围里真有的分类，
-     * 顺序照 {@link Categories#order()}（创造栏页签顺序），认不出的排最后。
+     * 顺序照 {@link #pickCatOrder()}（创造栏页签顺序），认不出的排最后。
      *
      * <p>只看「范围」、不看关键字：这样打字时下拉不会一行行跳，选中的那一类也不会凭空消失
      * （真被筛空了清单会显示 0 种，玩家自己能看出来）。
@@ -2659,7 +2683,7 @@ public class WarehouseScreen extends Screen {
                 collectCats(ClientSnapshot.find(clean(entry.name)), seen);
             }
         }
-        List<String> order = Categories.order();
+        List<String> order = pickCatOrder();
         List<String> rest = new ArrayList<>(seen);
         rest.sort(Comparator.comparingInt((String k) -> {
             int i = order.indexOf(k);
@@ -2669,6 +2693,22 @@ public class WarehouseScreen extends Screen {
         out.add("");
         out.addAll(rest);
         return out;
+    }
+
+    /**
+     * 分类候选的排序清单（创造栏页签顺序）。
+     *
+     * <p>优先用服务端随快照发来的那一份（1.1.1 起，跟标签栏下拉同源，连顺序都和房主一致）；
+     * 老服务端不发时退到本机注册表推出来的清单（{@link Categories#registryOrder()}，
+     * 访客客户端唯一能用的那份）；最后才是 {@link Categories#order()} 的本地兜底。
+     */
+    private static List<String> pickCatOrder() {
+        List<String> server = ClientSnapshot.categories();
+        if (server != null && !server.isEmpty()) {
+            return server;
+        }
+        List<String> local = Categories.registryOrder();
+        return local != null && !local.isEmpty() ? local : Categories.order();
     }
 
     /**
@@ -2682,11 +2722,9 @@ public class WarehouseScreen extends Screen {
             return;
         }
         for (ClientSnapshot.Item it : view.items) {
-            if (it != null && it.id != null && !it.id.isEmpty()) {
-                String key = Categories.of(it.id);
-                if (key != null && !key.isEmpty()) {
-                    out.add(key);
-                }
+            String key = itemCat(it);
+            if (key != null && !key.isEmpty()) {
+                out.add(key);
             }
         }
     }

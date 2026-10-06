@@ -432,6 +432,10 @@ public final class SnapshotSync {
                         dto.truncated = true;
                         break outer;
                     }
+                    // 类目键（1.1.3）：客户端进程里没有 MinecraftServer，自己算不出「物品→创造页签」
+                    // ⇒ 由服务端逐行带上，访客的取货页筛选才会与房主完全一致。
+                    // 老客户端 Gson 直接忽略这个字段，互不影响。
+                    item.category = row.category;
                     rd.items.add(item);
                 }
             }
@@ -790,6 +794,17 @@ public final class SnapshotSync {
         String ench = "";
         /** 同一变体里出现过的自定义名（{@code ; } 连接）；空 = 没改名 */
         String customName = "";
+        /**
+         * 1.1.3：这一行的类目键（如 {@code minecraft:building_blocks}），由服务端算好。
+         *
+         * <p>客户端（访客）进程里没有 {@code MinecraftServer}，建不起「物品→创造页签」表，
+         * 只能把每件物品都算成「其他」——取货页的类目下拉因此曾经只剩「全部分类 / 其他」。
+         * 这里直接带上服务端算好的键，客户端优先用它，老服务端不发 ⇒ 空串 ⇒ 行为与旧版一致。
+         *
+         * <p><b>字段名必须与 {@code ClientSnapshot.Item.category} 一字不差</b>：两边用 Gson
+         * 按字段名对拷，名字差一个字母（例如写 {@code cat}）就会永远解析成空串，取货页照样只剩「其他」。
+         */
+        String category = "";
     }
 
     static final class BotDto {

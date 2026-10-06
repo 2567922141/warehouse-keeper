@@ -37,6 +37,14 @@ public final class ClientSnapshot {
         public String ench = "";
         /** 这一行里出现过的自定义名（{@code ; } 连接）；空 = 没改名 */
         public String customName = "";
+        /**
+         * 1.1.3：这一行的类目键（如 {@code minecraft:building_blocks}），服务端算好发过来的；
+         * 空串 = 老服务端不发。
+         *
+         * <p>客户端进程里没有 MinecraftServer，建不起「物品→创造页签」表，自己算会把每件物品
+         * 都算成「其他」（取货页的类目下拉曾经只剩「全部分类 / 其他」）。有值就优先用它。
+         */
+        public String category = "";
     }
 
     /** 箱子总览的一行（批次 4）。双联箱在服务端索引里就是一条记录，所以一只箱子一行 */
@@ -209,6 +217,9 @@ public final class ClientSnapshot {
                         }
                         if (it.customName == null) {
                             it.customName = "";
+                        }
+                        if (it.category == null) {
+                            it.category = "";
                         }
                     }
                 }

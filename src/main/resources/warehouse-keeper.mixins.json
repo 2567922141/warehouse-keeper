@@ -2,6 +2,9 @@
   "required": true,
   "minVersion": "0.8",
   "package": "com.ds.warehouse.mixin",
+  "mixins": [
+    "PlayerLimitMixin"
+  ],
   "client": [
     "PlayerDisplayNameMixin"
   ],

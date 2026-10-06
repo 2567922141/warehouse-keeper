@@ -252,8 +252,10 @@ public final class Body {
         ServerPlayer bot = get(server, name);
         if (bot != null) {
             // 26.3：挥手动画被参数化 —— swing(InteractionHand, SwingAnimation, boolean)。
-            // 第三个参数取 true，才与 26.2 的老语义完全一致（26.2 的 swing(hand) 内部就是 swing(hand, true)）。
-            bot.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+            // 第三个参数是 sendToSwingingEntity；javap 复核 26.2 的 swing(hand) 字节码转发的是
+            // false（iconst_0），所以这里也传 false 才是严格等价迁移 —— 传 true 会让假人自己的
+            // 连接多收一个自己的挥手动画包。
+            bot.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, false);
         }
     }
 

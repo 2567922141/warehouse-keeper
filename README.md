@@ -43,7 +43,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 的 Fabric 模组，用于集中管理
 
 | 组件 | 版本要求 |
 | --- | --- |
-|warehouse-keeper|1.1.4|
+|warehouse-keeper|1.1.5|
 | Minecraft | 26.3 |
 | Fabric Loader | 0.19.5（0.19.3 或更高） |
 | Fabric API | 0.161.0+26.3（或兼容版本） |
@@ -51,10 +51,19 @@ Warehouse Keeper 是面向 Minecraft 26.3 的 Fabric 模组，用于集中管理
 | Carpet（可选） | 适配Minecraft26.3|
 |warehouse-keeper-voice（可选）|0.1.0及以上|
 
+<<<<<<< HEAD
+=======
+> **注：**
+>
+> 1. 想要下载适用于 Minecraft 26.2 的版本请选择 v1.1.3 或更早期版本：[查看 26.2 分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)
+> 2. [Carpet（可选）](https://github.com/gnembon/fabric-carpet)：用于生成可见假人搬运工，不安装不影响主体功能。
+> 3. [warehouse-keeper-voice（可选）](https://github.com/2567922141/warehouse-keeper-voice)：一个基于 warehouse-keeper（本模组）开发的语音取货插件包。
+
+>>>>>>> d88268b (1.1.5：修复跨仓库少拿、挥手动画参数与面板非数字数量)
 ## 安装
 
 1. 安装 Fabric Loader 0.19.5（0.19.3 或更高）并准备 Minecraft 26.3 客户端或服务端。
-2. 将 Fabric API 与 `warehouse-keeper-1.1.4.jar` 放入游戏实例的 `mods/` 目录。注意不要在 `mods/` 里同时留下新旧两个 jar（同一模组 ID 会导致加载失败）。
+2. 将 Fabric API 与 `warehouse-keeper-1.1.5.jar` 放入游戏实例的 `mods/` 目录。注意不要在 `mods/` 里同时留下新旧两个 jar（同一模组 ID 会导致加载失败）。
 3. 联机使用时，服务端与客户端均需安装本模组。
 4. 可选：安装 Carpet 以显示人形搬运工。未安装时搬运工不可见，取货与整理功能不受影响。
 
@@ -170,14 +179,29 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 >
 > 早期版本记录里提到的「网页」（网页面板、网页下单等）属于重写前的旧版本线；26.2 版本线自 0.20.0 起重写，不含网页端，相关能力只在游戏内面板与指令里提供。
 
-### 1.1.4（当前）
+### 1.1.5（当前）
+
+> 修复复审发现的取货语义与挥手动画问题。功能、指令与配置与 1.1.4 一致。
+
+**问题修复**
+
+- **跨仓库取货可能少拿却记成「已送达」**：库存校验原来用的是**全仓合计**，而实际取货只从「假人值守的那一间仓库」里取 —— A 仓 10 个（有假人值守）、B 仓 100 个（没假人）时下单 50 会被放行，实际只交付 10 个并记为已送达。现在下单时按**有人值守的仓库**分别校验（不足则明确拒绝，并提示给货多的仓库指派假人），派单时再按该假人值守的仓库复核一次；「仓库中仅剩 N 个」的说明也不再被交货提示覆盖。
+- **搬运工挥手多收一个自己的动画包**：26.3 的 `swing` 第三参是 `sendToSwingingEntity`，1.1.4 传了 `true`；javap 复核 26.2 的单参数版本转发的是 `false`，已改回 `false`，与 1.1.3 严格等价。
+- **面板取货数量填了非数字会静默按 1 个下单**：现在明确提示「数量请填 1~4096 的整数」并且不下单。
+
+**升级提示**
+
+- 替换 `mods/` 里的旧 jar 即可；索引、配置、仓库定义、标签、权限与审计全部沿用，不需要重新扫描。
+- 服务端与客户端都要换成 1.1.5（跨仓库校验在服务端执行，只升客户端不生效）。
+
+### 1.1.4
 
 > 适配 Minecraft 26.3（「奔赴荒野」，2026/09/15）的平台迁移版。除下面列出的行为订正外，功能、指令、索引格式与配置文件与 1.1.3 一致。
 
 **适配与修复**
 
 - **窗口与输入层换成 SDL3**：26.3 用 SDL3 取代 GLFW，`org.lwjgl.glfw` 不再可用；按键注册改用 `InputConstants.Type.KEYBOARD` + `InputConstants.KEY_B`。默认按键与键位设置行为不变。
-- **`LivingEntity.swing` 签名变化**：26.3 为 `swing(InteractionHand, SwingAnimation, boolean)`，搬运工挥手传 `SwingAnimation.DEFAULT` 与 `true`，与 26.2 的单参数语义一致。
+- **`LivingEntity.swing` 签名变化**：26.3 为 `swing(InteractionHand, SwingAnimation, boolean)`，搬运工挥手传 `SwingAnimation.DEFAULT` 与 `false`；javap 复核 26.2 的单参数版本转发的是 `false`，因此与 1.1.3 行为一致。
 - **`Inventory.placeItemBackInInventory` 增加预测参数**：搬运工在服务端执行，使用 `Prediction.SERVER_ONLY`。
 - **依赖约束更新**：`minecraft` 约束由 `~26.2` 改为 `~26.3`；Fabric Loader 0.19.5 与 Fabric API 0.161.0+26.3 实测通过。
 - **更多箱子（Iron Chests）在 26.3 暂缺**：它没有 26.3 版本，其 `~26.2` 约束会让加载器拒绝启动开发环境，因此只从开发期依赖移除（本来就不在发布产物与 `depends` 里）。装与不装都照常工作。
@@ -315,7 +339,7 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 
 ## 模组兼容性
 
-- [更多箱子 Iron Chests](https://modrinth.com/mod/cyberanner-ironchest)
+- [更多箱子 Iron Chests](https://modrinth.com/mod/cyberanner-ironchest)：它是任意 `Container` 实现，照常进索引与整理；但该模组暂无 26.3 版本，**26.3 上尚未实测**（26.2 版本线正常）
 - [Carpet](https://modrinth.com/mod/carpet)：安装后搬运工以可见人形出现；不装也能正常取货与整理
 
 ## 许可证

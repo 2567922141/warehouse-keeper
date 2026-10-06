@@ -233,6 +233,26 @@ public final class Porter {
             return "仓库里「" + entry.displayName + "」只有 " + entry.total + " 个，不够 " + want
                     + " 个，没有下单。";
         }
+        // 1.1.5：取货只从「假人值守的那一间仓库」里取（见 startNext），所以还要按仓库分别核一次 ——
+        // 否则 A 仓 10 个（有假人）+ B 仓 100 个（没假人）时下单 50 会被放行，实际只交付 10 个。
+        long staffedMost = 0L;
+        String staffedBest = null;
+        for (String region : where) {
+            if (!anyBotOn(List.of(region))) {
+                continue;
+            }
+            long inRegion = regionTotal(entry, region);
+            if (inRegion > staffedMost) {
+                staffedMost = inRegion;
+                staffedBest = region;
+            }
+        }
+        if (staffedMost < want) {
+            return "「" + entry.displayName + "」一共有 " + entry.total + " 个，但有假人值守的仓库里最多只有 "
+                    + staffedMost + " 个" + (staffedBest == null ? "" : "（" + staffedBest + "）")
+                    + "，不够 " + want + " 个，没有下单。"
+                    + "请给货多的仓库指派假人：/warehouse bot assign <假人> <仓库>";
+        }
         Order o = new Order(playerName, playerId, entry.itemId, entry.displayName, want);
         o.ench = ench == null ? "" : ench;
         PENDING.addLast(o);
@@ -875,6 +895,18 @@ public final class Porter {
                 finish(server, o, "「" + o.displayName + "」不在「" + botRegion + "」仓库里，无法派单。", true);
                 continue;
             }
+            // 1.1.5：下单时按「有人值守的仓库」校过一次，这里再按**这个假人值守的仓库**核一次
+            // （下单与派单之间索引可能已经变了）。不够就明确失败，绝不把少拿当成功。
+            long available = 0L;
+            for (WarehouseIndex.SlotRef ref : mine) {
+                available += ref.count();
+            }
+            if (available < o.count) {
+                PENDING.pollFirst();
+                finish(server, o, "「" + o.displayName + "」在「" + botRegion + "」里只有 " + available
+                        + " 个，不够 " + o.count + " 个，没有取货。", true);
+                continue;
+            }
             PENDING.pollFirst();
             activeBotName = pick;
             refs = mine;
@@ -1016,7 +1048,7 @@ public final class Porter {
             return;
         }
         if (o.taken < o.count) {
-            o.note = "仓库中仅剩 " + o.taken + " 个。";
+            o.note = appendNote(o.note, "仓库中仅剩 " + o.taken + " 个。");
         }
         // 让假人真的把货拿在手上（玩家能看见它举着东西）
         Body.hold(server, activeBotName, carried.isEmpty() ? null : carried.get(0).stack());
@@ -1177,7 +1209,7 @@ public final class Porter {
         Body.swing(server, activeBotName);
 
         String extra = total > free ? " 背包空间不足，" + (total - free) + " 个已掉落在你脚下。" : "";
-        o.note = "已将 " + delivered + " 个 " + o.displayName + " 送达 " + o.playerName + "。" + extra;
+        o.note = appendNote(o.note, "已将 " + delivered + " 个 " + o.displayName + " 送达 " + o.playerName + "。" + extra);
         o.state = "交货中";
         o.step = STEP_SHOW;
         // 在玩家面前多站 1.5 秒再走 —— 不然人一闪就没，玩家根本看不清是谁送的
@@ -1385,6 +1417,25 @@ public final class Porter {
 
     // ------------------------------------------------------------------
     // 收尾
+
+    /** 某个仓库范围内这件物品的合计数量（取货只认「假人值守的那一间仓库」的量）。 */
+    private static long regionTotal(WarehouseIndex.ItemEntry entry, String region) {
+        long sum = 0L;
+        for (WarehouseIndex.SlotRef ref : entry.refs) {
+            if (region.equals(regionOfPos(ref.dimension(), ref.pos()))) {
+                sum += ref.count();
+            }
+        }
+        return sum;
+    }
+
+    /** 追加一条给玩家看的说明，不覆盖先前的（例如「仅剩 N 个」要在「已送达」之后仍能看到）。 */
+    private static String appendNote(String existing, String note) {
+        if (existing == null || existing.isEmpty()) {
+            return note;
+        }
+        return existing + " " + note;
+    }
 
     private static void finish(MinecraftServer server, Order o, String note, boolean failed) {
         if (note != null && !note.isEmpty()) {

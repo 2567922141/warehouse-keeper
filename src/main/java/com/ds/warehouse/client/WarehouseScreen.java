@@ -3043,9 +3043,14 @@ public class WarehouseScreen extends Screen {
             return;
         }
         int amount = parseOrderCount();
-        if (amount < 0) {
+        if (amount == -1) {
             // 1.1.4 · 超上限不再静默压成 4096，而是像服务端一样明确说一句
-            status = "一次最多下单 4096 个（你填了 " + orderCountText.trim() + " 个）。";
+            status = "一次最多下单 4096 个（你填了 " + orderCountText.trim() + " 个），没有下单。";
+            return;
+        }
+        if (amount == -2) {
+            // 1.1.5 · 填了非数字也不再静默按 1 个下单
+            status = "数量请填 1~4096 的整数（你填了「" + orderCountText.trim() + "」），没有下单。";
             return;
         }
         run("warehouse order " + what + " " + amount,
@@ -3313,7 +3318,12 @@ public class WarehouseScreen extends Screen {
         }
     }
 
-    /** 取货数量：默认 1，最多 4096（和服务端的 MAX_ORDER 一致）；超上限返回 -1，由调用方提示。 */
+    /**
+     * 取货数量：默认 1，最多 4096（和服务端的 MAX_ORDER 一致）。
+     *
+     * <p>超上限返回 -1、填了非数字返回 -2，都由调用方明确提示并**不下单**
+     * （以前非数字会静默按 1 个下单，玩家以为下了 N 个）。
+     */
     private int parseOrderCount() {
         try {
             int value = Integer.parseInt(orderCountText.trim());
@@ -3322,7 +3332,7 @@ public class WarehouseScreen extends Screen {
             }
             return value > 4096 ? -1 : value;
         } catch (Exception ex) {
-            return 1;
+            return -2;
         }
     }
 

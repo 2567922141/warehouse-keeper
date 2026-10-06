@@ -12,9 +12,11 @@ AI can make mistakes. It is intended for vibe coding and learning purposes only 
 
 ## 简介
 
-Warehouse Keeper 是面向 Minecraft 26.3 的 Fabric 模组，用于集中管理基地仓库。模组把若干矩形区域登记为「仓库」，扫描区域内全部容器并建立物品索引，随后在游戏内以可视化面板提供查询、取货、整理与权限管理，并由被称为「搬运工」的假人执行实际的搬运作业。
+Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组，用于集中管理基地仓库。模组把若干矩形区域登记为「仓库」，扫描区域内全部容器并建立物品索引，随后在游戏内以可视化面板提供查询、取货、整理与权限管理，并由被称为「搬运工」的假人执行实际的搬运作业。
 
 模组同时提供客户端与服务端内容：联机时服务端负责索引与作业，客户端负责面板与中文物品名；单人游戏下两者同时生效。
+
+当前主要维护适用于 Minecraft 26.3的版本（V1.1.4及以上）。
 
 ## 功能特性
 
@@ -193,7 +195,7 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 
 ### 1.1.4
 
-> 适配 Minecraft 26.3（「奔赴荒野」，2026/09/15）的平台迁移版。除下面列出的行为订正外，功能、指令、索引格式与配置文件与 1.1.3 一致。
+> 正式适配 Minecraft 26.3（「奔赴荒野」，2026/09/15）。除下面列出的行为订正外，功能、指令、索引格式与配置文件与 1.1.3 一致。
 
 **适配与修复**
 
@@ -201,10 +203,9 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 - **`LivingEntity.swing` 签名变化**：26.3 为 `swing(InteractionHand, SwingAnimation, boolean)`，搬运工挥手传 `SwingAnimation.DEFAULT` 与 `false`；javap 复核 26.2 的单参数版本转发的是 `false`，因此与 1.1.3 行为一致。
 - **`Inventory.placeItemBackInInventory` 增加预测参数**：搬运工在服务端执行，使用 `Prediction.SERVER_ONLY`。
 - **依赖约束更新**：`minecraft` 约束由 `~26.2` 改为 `~26.3`；Fabric Loader 0.19.5 与 Fabric API 0.161.0+26.3 实测通过。
-- **更多箱子（Iron Chests）在 26.3 暂缺**：它没有 26.3 版本，其 `~26.2` 约束会让加载器拒绝启动开发环境，因此只从开发期依赖移除（本来就不在发布产物与 `depends` 里）。装与不装都照常工作。
 - **取货数量超上限时不再静默截断**：面板、指令与语音下单的数量超过 4096 时，1.1.3 会静默按 4096 处理；现在改为明确提示「一次最多下单 4096 个」并且**不下单**，与服务端 `Porter.MAX_ORDER` 的判定一致。
 
-**升级提示**
+**存档及模组升级提示**
 
 - **存档升级不可逆**：26.3 的 `DataVersion` 从 4903 升到 5023，存档一旦在 26.3 里保存就无法再用 26.2 打开，升级前请备份 `saves/`。
 - 已探索区块不会重生成，新区块按 26.3 的新世界生成算法产生，边界可能有接缝；数据包/资源包格式从 107.1/88 跳到 121.0/97.1。
@@ -214,6 +215,8 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 ### 1.1.3
 
 > 来自 10/6 实机反馈（issue #4）：多人游戏下客户端取货页的分类下拉只剩「全部分类」和「其他」；以及假人算一个玩家，假人多了真人反而进不来。
+
+> V1.1.3是目前适配 Minecraft 26.2的最后一个新版本。
 
 **问题修复**
 
@@ -336,8 +339,8 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 
 ## 模组兼容性
 
-- [更多箱子 Iron Chests](https://modrinth.com/mod/cyberanner-ironchest)：它是任意 `Container` 实现，照常进索引与整理；但该模组暂无 26.3 版本，**26.3 上尚未实测**（26.2 版本线正常）
-- [Carpet](https://modrinth.com/mod/carpet)：安装后搬运工以可见人形出现；不装也能正常取货与整理
+- [Carpet](https://github.com/gnembon/fabric-carpet)：安装后搬运工以可见人形出现；不装也能正常取货与整理
+- [warehouse-keeper-voice](https://github.com/2567922141/warehouse-keeper-voice)：一个基于 warehouse-keeper（本模组）开发的语音取货插件包。
 
 ## 许可证
 

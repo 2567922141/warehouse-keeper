@@ -51,15 +51,12 @@ Warehouse Keeper 是面向 Minecraft 26.3 的 Fabric 模组，用于集中管理
 | Carpet（可选） | 适配Minecraft26.3|
 |warehouse-keeper-voice（可选）|0.1.0及以上|
 
-<<<<<<< HEAD
-=======
 > **注：**
 >
 > 1. 想要下载适用于 Minecraft 26.2 的版本请选择 v1.1.3 或更早期版本：[查看 26.2 分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)
 > 2. [Carpet（可选）](https://github.com/gnembon/fabric-carpet)：用于生成可见假人搬运工，不安装不影响主体功能。
 > 3. [warehouse-keeper-voice（可选）](https://github.com/2567922141/warehouse-keeper-voice)：一个基于 warehouse-keeper（本模组）开发的语音取货插件包。
 
->>>>>>> d88268b (1.1.5：修复跨仓库少拿、挥手动画参数与面板非数字数量)
 ## 安装
 
 1. 安装 Fabric Loader 0.19.5（0.19.3 或更高）并准备 Minecraft 26.3 客户端或服务端。

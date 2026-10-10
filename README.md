@@ -1,12 +1,12 @@
 # Warehouse Keeper · 假人仓库管理模组
 
-**声明**
+## 声明
 
-这是一个 100% Vibe Coding 项目，所有代码及代码审查均有 AI 负责，人工负责真机测试。
+这是一个 100% Vibe Coding 项目，所有代码及代码审查均有 AI 负责，人工负责在真机环境下，在真实的游戏存档中测试。
 
 AI 有可能犯错，仅供 vibe coding 学习用途，请勿用于工业生产以及其他重要行业中。若出现任何损失，后果自负！！！
 
-This is a 100% Vibe Coding project: all coding and code review were done by AI, while humans handled real-device testing.
+This is a 100% Vibe Coding project. All code and code reviews are handled by AI, while humans are responsible for testing on real devices with real game saves.
 
 AI can make mistakes. It is intended for vibe coding and learning purposes only — do not use it in industrial production or any other critical field. Any losses are your own responsibility!!!
 
@@ -15,6 +15,10 @@ AI can make mistakes. It is intended for vibe coding and learning purposes only 
 Warehouse Keeper 是面向 Minecraft 26.2 的 Fabric 模组，用于集中管理基地仓库。模组把若干矩形区域登记为「仓库」，扫描区域内全部容器并建立物品索引，随后在游戏内以可视化面板提供查询、取货、整理与权限管理，并由被称为「搬运工」的假人执行实际的搬运作业。
 
 模组同时提供客户端与服务端内容：联机时服务端负责索引与作业，客户端负责面板与中文物品名；单人游戏下两者同时生效。
+
+### 当前主要维护适用于 Minecraft 26.3的版本（V1.1.4及以上）。
+### 本页面为适用于 Minecraft 26.2 分支页面，暂时停止维护。
+#### 若需要下载并安装适用于 Minecraft 26.3 的模组版本，[可点击此处前往26.3分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.3)，[点击此处前往最新适用于 Minecraft 26.3 的模组发行版页面](https://github.com/2567922141/warehouse-keeper/releases)
 
 ## 功能特性
 

@@ -33,9 +33,9 @@ bin/
 run/
 manifest.json
 
-# 语音附加包：本地构建输入（Vosk 原生库与中文模型，均为可公开下载的大文件，不进仓库）
-# 由 voice/fetch-libs.ps1 重新生成
-voice/libs/
+# 语音附加包：源码在独立仓库 warehouse-keeper-voice，用 robocopy 同步到 voice/ 再参与构建。
+# 整个构建副本都不进仓库（含 libs/ 与 fetch-libs.ps1 生成的原生库）；只锚定仓库根下的 voice/。
+/voice/
 
 # java
 

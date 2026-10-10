@@ -145,16 +145,13 @@ public final class AppConfig {
     }
 
     public void save() {
-        Path f = configPath();
-        try {
-            Files.createDirectories(f.getParent());
-            try (Writer w = Files.newBufferedWriter(f, StandardCharsets.UTF_8)) {
+        // 先写 .tmp 再原子替换：settings.json 是玩家手改最多的文件，直接覆盖的话
+        // 中途崩了/掉电会留下半截文件，下次启动整份设置都读不回来（审查发现 T2）
+        WorldStore.writeAtomic(configPath(), tmp -> {
+            try (Writer w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)) {
                 GSON.toJson(this, w);
             }
-        } catch (IOException e) {
-            com.ds.warehouse.WarehouseMod.LOGGER.warn(
-                    "[warehouse-keeper] 写入 settings.json 失败: {}", e.toString());
-        }
+        });
     }
 
     public void normalize() {

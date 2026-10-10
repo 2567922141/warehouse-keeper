@@ -401,6 +401,19 @@ public final class Porter {
         }
         drainIncoming();
 
+        // 假人被别的来源弄死了（Carpet 的 /player X kill、掉虚空、别的模组）：Body 在死亡那一刻
+        // 已经把副手摘干净了，这里负责把「正在跑的那一单」按放弃收尾 —— 否则状态机会一直卡在
+        // 一个已经死掉的假人身上（审查发现 S2）。
+        for (String gone = Body.pollDead(); gone != null; gone = Body.pollDead()) {
+            if (active != null && gone.equalsIgnoreCase(activeBotName)) {
+                boolean had = !carried.isEmpty();
+                returnCarried(server);
+                finish(server, active, had
+                        ? "搬运工半路没了，本单已放弃；已取出的物品已放回仓库。"
+                        : "搬运工半路没了，本单已放弃。", true);
+            }
+        }
+
         if (active == null) {
             startNext(server);
         }
@@ -1457,6 +1470,11 @@ public final class Porter {
         waited = 0;
         String who = activeBotName;
         activeBotName = "";
+        // 退场前先把副手上举着的「表演副本」摘掉（审查发现 S1）。
+        // 那个副本是 carried.get(0).stack() 的真实拷贝：finish 之后正本已经回仓库了，
+        // 副本要是留在假人手上，之后它被任何模组外原因杀死就会掉成真物品 = 凭空多一份。
+        // 和 Tasks.cleanup、Body.remove 同口径。
+        Body.hold(server, who, null);
 
         ServerPlayer p = find(server, o);
         if (p != null) {

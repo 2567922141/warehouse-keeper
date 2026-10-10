@@ -141,7 +141,12 @@ public final class ContainerTags {
         }
         try (Reader r = Files.newBufferedReader(f, StandardCharsets.UTF_8)) {
             Map<String, Tag> read = GSON.fromJson(r, TYPE);
-            if (read != null) {
+            if (read == null) {
+                // 文件里是「null」/空：读不出内容，但**先留一份再继续** ——
+                // 否则下一次 save 就把这份文件整体覆盖掉了（审查发现 T1）
+                WorldStore.backupUnreadable(f);
+                WarehouseMod.LOGGER.warn("{} 里没有标签内容，已另存备份后按空表继续", f.getFileName());
+            } else {
                 for (Map.Entry<String, Tag> e : read.entrySet()) {
                     if (e.getValue() != null) {
                         MAP.put(e.getKey(), e.getValue());
@@ -150,6 +155,8 @@ public final class ContainerTags {
             }
             WarehouseMod.LOGGER.info("已载入 {} 条箱子标签: {}", MAP.size(), f);
         } catch (Exception e) {
+            // 读不动的文件不能被下一次 save() 覆盖掉：先留一份 .bak（审查发现 T1）
+            WorldStore.backupUnreadable(f);
             WarehouseMod.LOGGER.warn("读取 {} 失败（标签丢失不影响物品安全）: {}", f, e.toString());
         }
     }

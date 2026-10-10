@@ -131,8 +131,14 @@ public final class Bots {
                             LIST.add(e);
                         }
                     }
+                } else {
+                    // JSON 是 null / 缺 bots 字段：名册读不出来，但**先留一份再继续**，
+                    // 别让 ensureDefault + save 把它整体覆盖掉（审查发现 T1）
+                    WorldStore.backupUnreadable(f);
+                    WarehouseMod.LOGGER.warn("{} 里没有名册内容，已另存备份后按默认名册继续", f.getFileName());
                 }
             } catch (Exception e) {
+                WorldStore.backupUnreadable(f); // 读不动 ≠ 可以覆盖（T1）
                 WarehouseMod.LOGGER.warn("读取 {} 失败（用默认名册）: {}", f, e.toString());
             }
         }

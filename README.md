@@ -1,24 +1,25 @@
 # Warehouse Keeper · 假人仓库管理模组
 
-**声明**
+## 0.Vibe Coding开发声明
 
-这是一个 100% Vibe Coding 项目，所有代码及代码审查均有 AI 负责，人工负责真机测试。
+这是一个 100% Vibe Coding 项目，所有代码及代码审查均有 AI 负责，人工负责在真机环境下，在真实的游戏存档中测试。
 
 AI 有可能犯错，仅供 vibe coding 学习用途，请勿用于工业生产以及其他重要行业中。若出现任何损失，后果自负！！！
 
-This is a 100% Vibe Coding project: all coding and code review were done by AI, while humans handled real-device testing.
+This is a 100% Vibe Coding project. All code and code reviews are handled by AI, while humans are responsible for testing on real devices with real game saves.
 
 AI can make mistakes. It is intended for vibe coding and learning purposes only — do not use it in industrial production or any other critical field. Any losses are your own responsibility!!!
 
-## 简介
+## 1.简介
 
 Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组，用于集中管理基地仓库。模组把若干矩形区域登记为「仓库」，扫描区域内全部容器并建立物品索引，随后在游戏内以可视化面板提供查询、取货、整理与权限管理，并由被称为「搬运工」的假人执行实际的搬运作业。
 
 模组同时提供客户端与服务端内容：联机时服务端负责索引与作业，客户端负责面板与中文物品名；单人游戏下两者同时生效。
 
-当前主要维护适用于 Minecraft 26.3的版本（V1.1.4及以上）。
+### 当前主要维护适用于 Minecraft 26.3的版本（V1.1.4及以上）。
+#### V1.1.3及更早的模组版本适配 Minecraft 26.2，若需要下载并安装适用于 Minecraft 26.2的模组版本，[点击此处前往模组26.2分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)，[点击此处前往V1.1.3发行版下载界面](https://github.com/2567922141/warehouse-keeper/releases#release-v1.1.3)
 
-## 功能特性
+## 2.功能特性
 
 - **仓库登记**：以两个对角点划定矩形区域并保存为仓库，支持扩大、缩小、合并与高度调整；缩小可按方向与格数逐边收缩，也可以一键「缩到我所站位置」（以你脚下的 16×16 区块为准，高度不变）。
 - **索引扫描**：一次扫描区域内所有容器（箱子、陷阱箱、木桶、潜影盒，以及 Iron Chests 等任意 `Container` 实现），记录物品 id、数量、所在仓库、坐标与槽位，并额外记录每件物品的附魔与自定义名，支持按附魔或自定义名检索（旧索引需要重新扫描一次才有这些数据）。雕纹书架、架子（展示架，12 种木架子）、熔炉、漏斗等非箱子容器照常进索引、可以在面板里查看内容，只是整理时不会把它们当作目标箱、也不会搬动它们。
@@ -28,7 +29,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 - **容器标签**：可为箱子设置分类标签、自动分类与暂存标记，容器界面显示统一的标签栏；分类键默认是原版创造栏页签，0.20 及更早的中文类目名仍可作为父类使用（贴着旧名的箱子照旧收下辖物品）。归类时优先选择与本物品所属分类**完全同名**的目标箱，其次才是贴旧中文类目名的箱子，父类兜底排在最后 —— 贴了「酿造附魔」的箱子不会再被更近的箱子抢走附魔书。标签栏默认自动选择左/右侧或横向条带，也可在面板「维护」页固定到某一侧（设置存在客户端配置文件里）；标签栏只在真正打开的容器界面上出现，物品栏、创造模式物品栏以及工作方块（工作台、熔炉等带配方书的界面）上都不会再出现。
 - **权限与审计**：按玩家授予取货、指挥、整理三种权限，管理员（OP）可查看操作日志。
 
-## 游戏实机演示截图
+## 3.游戏实机演示截图
 
 ![仓库界面](./photo/image.png)
 
@@ -41,7 +42,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 
 
 
-## 运行环境
+## 4.运行环境
 
 | 组件 | 版本要求 |
 | --- | --- |
@@ -50,23 +51,23 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 | Fabric Loader | 0.19.5（0.19.3 或更高） |
 | Fabric API | 0.161.0+26.3（或兼容版本） |
 | Java | 25 或更高 |
-| Carpet（可选） | Carpet Mod 26.3 for Minecraft 26.3 |
+| fabric-carpet（可选） | Carpet Mod 26.3 for Minecraft 26.3 |
 |warehouse-keeper-voice（可选） | 0.1.0及以上 |
 
 > **注：**
 >
 > 1. 想要下载适用于 Minecraft 26.2 的版本请选择 v1.1.3 或更早期版本：[查看 26.2 分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)
-> 2. [Carpet（可选）](https://github.com/gnembon/fabric-carpet)：用于生成可见假人搬运工，不安装不影响主体功能。
+> 2. [fabric-carpet（可选）](https://github.com/gnembon/fabric-carpet)：用于生成可见假人搬运工，不安装不影响主体功能。
 > 3. [warehouse-keeper-voice（可选）](https://github.com/2567922141/warehouse-keeper-voice)：一个基于 warehouse-keeper（本模组）开发的语音取货插件包。
 
-## 安装
+## 5.安装
 
 1. 安装 Fabric Loader 0.19.5（0.19.3 或更高）并准备 Minecraft 26.3 客户端或服务端。
 2. 将 Fabric API 与 `warehouse-keeper-1.1.5.jar` 放入游戏实例的 `mods/` 目录。注意不要在 `mods/` 里同时留下新旧两个 jar（同一模组 ID 会导致加载失败）。
-3. 联机使用时，服务端与客户端均需安装本模组。
-4. 可选：安装 Carpet 以显示人形搬运工。未安装时搬运工不可见，取货与整理功能不受影响。
+3. 联机使用时，若客户端需要使用该模组，服务端与客户端均需安装本模组；客户端若不使用该模组，可不安装。
+4. 可选模组请看
 
-## 快速开始
+## 6.快速开始
 
 1. `/warehouse pos1` 与 `/warehouse pos2` 选择仓库的两个对角点，执行 `/warehouse region save <名称>` 保存仓库。
 2. 执行 `/warehouse scan <仓库>` 建立索引，`/warehouse status` 查看扫描进度。
@@ -75,7 +76,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 5. `/warehouse tidy <仓库>` 让搬运工整理仓库；`/warehouse order <物品> [数量]` 下单取货并由搬运工送达。
 6. `/warehouse user perm <玩家> take|bot|tidy on|off` 授予其他玩家对应权限。
 
-## 命令参考
+## 7.命令参考
 
 全部指令以 `/warehouse` 开头，不带参数的子命令会输出各自的用法提示。
 
@@ -90,7 +91,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 
 修改性命令仅限管理员（OP）执行。普通玩家可用 `status`、`list`、`find`、`enchants`、`stats`、`porter`（只读部分）与 `tag show/list`；`order`、`give` 需要「取货」权限，`tag` 的修改类子命令需要「整理」权限，二者均以管理员（OP）身份执行时不受限制。
 
-## 游戏内面板
+## 8.游戏内面板
 
 按默认按键 `B`（可在「选项 → 控制」中修改「打开仓库管理界面」）打开面板。
 
@@ -101,7 +102,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 - **列表滚动**：凡是会溢出的清单，右缘都有一条可拖滑块（按住拖动、点轨道跳转），也可以直接用鼠标滚轮；滑块只在内容真的超出一屏时才出现，不溢出时行与文字按满宽排，不会白留一条空槽。
 - **权限**页：权限与审计；按玩家切换取货、指挥、整理三种权限，并查看操作日志。
 
-## 数据与存档
+## 9.数据与存档
 
 模组不直接改写存档数据，运行期产生的文件均位于游戏实例的配置目录：
 
@@ -119,7 +120,7 @@ config/warehouse-keeper-client.json  客户端设置（容器标签栏的停靠�
 
 整理、取货与投递均由搬运工以正常容器交互完成，效果等同于玩家手动操作。
 
-## 从源码构建
+## 10.从源码构建
 
 编译目标为 Java 25，请将 `JAVA_HOME` 指向 JDK 25（含 `javac`），或通过 `-Dorg.gradle.java.home=<JDK 25 路径>` 指定。
 
@@ -140,7 +141,7 @@ export JAVA_HOME=<JDK 25 路径>
 
 开发期运行：`gradlew runClient` 与 `gradlew runServer` 会在 `run/` 目录下启动开发实例（该目录已被 `.gitignore` 忽略）。
 
-## 目录结构
+## 11.目录结构
 
 ```
 src/main/java/com/ds/warehouse/
@@ -159,7 +160,7 @@ photo/                     README 与发行说明里引用的界面截图
 dist/                      随源码一起发布的模组 jar（warehouse-keeper-<版本>.jar）
 ```
 
-## 已知限制
+## 12.已知限制
 
 - 扫描进行期间，面板数据按较低频率刷新；扫描结束后恢复即时更新。
 - 未安装 Carpet 时搬运工不可见，仅能通过指令与面板观察作业结果。
@@ -172,13 +173,19 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 - 面板布局面向 720P 及以上分辨率设计，极窄窗口下部分区域会按可用空间降级或隐藏；自绘列表在布局时会做「文字块不越下一行」的自检，一旦越界会在日志里打出 `行块自检` 警告。
 - 容器界面标签栏的形态（左/右竖栏或上/下横条）会随窗口尺寸与容器尺寸自适应降级；「自动」在界面尺寸为 1 时优先贴左侧、更大时优先贴右侧。
 
-## 版本更新
+## 13.版本更新
 
 > 逐条改动见 Git 提交记录；下面是各版本的迭代摘要。
 >
 > 早期版本记录里提到的「网页」（网页面板、网页下单等）属于重写前的旧版本线；26.2 版本线自 0.20.0 起重写，不含网页端，相关能力只在游戏内面板与指令里提供。
 
-### 1.1.5（当前）
+### 1.1.6（当前）
+
+**问题修复**
+
+- 聊天栏 /warehousegui 面板一闪就回游戏、搬运工副手道具在假人死亡时掉落成真物品、配置与索引读不动被静默覆盖；同时把索引落盘移到后台、整理与巡检不再强制加载区块、仓库名含引号时不再被客户端改写。直接替换 jar 即可，索引与配置格式未变。
+
+### 1.1.5
 
 > 修复复审发现的取货语义与挥手动画问题。功能、指令与配置与 1.1.4 一致。
 
@@ -216,7 +223,7 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 
 > 来自 10/6 实机反馈（issue #4）：多人游戏下客户端取货页的分类下拉只剩「全部分类」和「其他」；以及假人算一个玩家，假人多了真人反而进不来。
 
-> V1.1.3是目前适配 Minecraft 26.2的最后一个新版本。
+> V1.1.3是目前最后一个适配 Minecraft 26.2的新版本，从V1.1.4版本起，mod主要适配Minecraft 26.3。
 
 **问题修复**
 
@@ -337,11 +344,11 @@ dist/                      随源码一起发布的模组 jar（warehouse-keeper
 
 - 首个版本：仓库登记、区域扫描与物品索引、索引持久化、游戏内面板、搬运工取货与入库、容器标签、权限与审计。
 
-## 模组兼容性
+## 14.模组兼容性
 
 - [Carpet](https://github.com/gnembon/fabric-carpet)：安装后搬运工以可见人形出现；不装也能正常取货与整理
-- [warehouse-keeper-voice](https://github.com/2567922141/warehouse-keeper-voice)：一个基于 warehouse-keeper（本模组）开发的语音取货插件包。
+- [warehouse-keeper-voice](https://github.com/2567922141/warehouse-keeper-voice)：一个基于 warehouse-keeper（本模组）开发的语音取货插件包，该模组暂不支持 Minecraft 26.2。
 
-## 许可证
+## 15.许可证
 
 本项目采用 [MIT](LICENSE) 许可证。

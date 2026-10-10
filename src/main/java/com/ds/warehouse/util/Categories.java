@@ -865,13 +865,13 @@ public final class Categories {
     }
 
     private static void writeTemplate(Path f) throws Exception {
-        Files.createDirectories(f.getParent());
         String t = "{\n"
                 + "  \"_说明\": \"物品分类覆盖表：键 = 完整物品 id（必须带命名空间），值 = 分类名（页签键或旧中文名）。改完执行 /warehouse categories reload\",\n"
                 + "  \"_分类（页签键）\": \"" + String.join(" / ", order()) + "\",\n"
                 + "  \"_旧分类（仍可用，作父类）\": \"" + String.join(" / ", CategoryRules.ORDER) + "\",\n"
                 + "  \"_示例\": \"modid:example_item → minecraft:building_blocks；写 建材方块 也行（旧父类，只被贴着同名旧标签的箱子收）\"\n"
                 + "}\n";
-        Files.writeString(f, t, StandardCharsets.UTF_8);
+        // 先写 .tmp 再原子替换（审查发现 T6）：这张表也是玩家会手改的文件
+        com.ds.warehouse.config.WorldStore.writeAtomic(f, tmp -> Files.writeString(tmp, t, StandardCharsets.UTF_8));
     }
 }

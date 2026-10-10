@@ -3355,7 +3355,12 @@ public class WarehouseScreen extends Screen {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < raw.length(); i++) {
             char c = raw.charAt(i);
-            if (c == '\\' || c == '"' || c == '\n' || c == '\r' || c == '\t') {
+            // 只剥「写进指令文本就会截断参数」的控制字符。
+            // 引号和反斜杠**不能剥**（审查发现 N1）：服务端 NameArgument 走 Brigadier 的
+            // readQuotedString，是认 \" 和 \\ 转义的，所以 `a"b` 是一个合法且与 `ab` 不同的
+            // 仓库名。以前在这里静默剥掉它们，就会把两个仓库在客户端看成同一个名字，
+            // 删除/合并/扩建可能打到另一个仓库上。转义交给 q() 处理。
+            if (c < 0x20 || c == 0x7F) {
                 continue;
             }
             sb.append(c);
@@ -3380,15 +3385,30 @@ public class WarehouseScreen extends Screen {
     }
 
     /**
-     * 把名字拼进指令文本：含空格时加引号（服务端 {@code NameArgument} 见到引号会整段读）。
+     * 把名字拼进指令文本：含空格/引号/反斜杠时加引号，引号内的 {@code "} 与 {@code \} 要转义。
      *
-     * <p>{@link #clean(String)} 已经把引号剥掉了，所以这里只要决定加不加引号。
+     * <p>服务端 {@code NameArgument} 走的是 Brigadier 的 {@code readQuotedString()}：引号里认
+     * {@code \"} 与 {@code \\}，所以「a"b」和「ab」是两个不同的仓库名。{@link #clean(String)}
+     * 现在只剥控制字符、保留引号和反斜杠 —— 以前这里既不转义也不加引号，名字里同时带引号和
+     * 空格时整条指令会被拆成两半，删除/合并/扩建打到别的仓库上（审查发现 N1）。
      */
     private static String q(String name) {
         if (name == null) {
             return "\"\"";
         }
-        return name.indexOf(' ') >= 0 ? "\"" + name + "\"" : name;
+        boolean quote = false;
+        StringBuilder sb = new StringBuilder(name.length() + 4);
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c == ' ' || c == '"' || c == '\\') {
+                quote = true;
+                if (c == '"' || c == '\\') {
+                    sb.append('\\');
+                }
+            }
+            sb.append(c);
+        }
+        return quote ? "\"" + sb + "\"" : name;
     }
 
     // ------------------------------------------------------------------ 物品列表（含搜索过滤）

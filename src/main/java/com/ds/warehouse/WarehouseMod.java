@@ -26,11 +26,13 @@ import com.ds.warehouse.web.WebSnapshot;
 import com.ds.warehouse.web.WebUsers;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -97,6 +99,16 @@ public class WarehouseMod implements ModInitializer {
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             WarehouseCommand.forgetPlayer(handler.getPlayer().getUUID());
             SnapshotSync.forget(handler.getPlayer().getUUID());
+        });
+        // 假人死亡：它副手上举着的「表演副本」是世界里真实的一份物品（见 Body.hold），
+        // 必须在掉落之前摘掉 —— 被 Carpet 的 /player X kill、掉虚空、别的模组弄死时，
+        // 这一格会掉成真物品，等于凭空多一份（审查发现 S2）。Vanilla 把 ALLOW_DEATH
+        // 挂在 LivingEntity#die 开头，早于 dropAllDeathLoot，所以在这里清来得及。
+        ServerLivingEntityEvents.ALLOW_DEATH.register((entity, source, amount) -> {
+            if (entity instanceof ServerPlayer player) {
+                Body.onDeath(player);
+            }
+            return true;
         });
         // 按需查询（面板的总览/物品/容器几页），只读内存快照
         ViewQueryService.register();
@@ -177,7 +189,8 @@ public class WarehouseMod implements ModInitializer {
             Porter.flushBody(server);
             Body.removeAll(server);
             Bots.save();
-            String err = IndexStore.save(INDEX, server);
+            // 关服必须当场写完（后台保存是异步的，进程可能等不到它）——走 saveNow
+            String err = IndexStore.saveNow(INDEX, server);
             if (err != null) {
                 LOGGER.info("[warehouse-keeper] 退出时索引未保存: {}", err);
             }

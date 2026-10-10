@@ -982,6 +982,11 @@ public final class Tasks {
             if (level == null) {
                 return null;
             }
+            // 区块没加载就别看这只箱子：Scanner.mapOf 会 getChunk(...) 把区块强载起来，
+            // 而整理是每 tick 轮着扫所有箱子的（审查发现 S4）。跳过它，等玩家走到附近再看。
+            if (!level.isLoaded(rec.pos)) {
+                return null;
+            }
             // P0 建模（批次 1）：这个箱子只取一到两次 getBlockEntity，之后每一格直接用映射翻译。
             // 以前是「每格一次 openSlot」——每格都要 getChunk + getBlockEntity，双联箱后半还要再问搭档，
             // 搬一件物品就要上万次区块读取（每一步还会把所有箱子从头读一遍）

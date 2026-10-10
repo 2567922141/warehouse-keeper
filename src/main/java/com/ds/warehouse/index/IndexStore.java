@@ -38,6 +38,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 索引持久化。
@@ -77,9 +79,9 @@ public final class IndexStore {
     /** format 1：没有 categories 字段。仍然读得进来（分类现算），读之前先备份一份 index.v1.bak */
     private static final int FORMAT_LEGACY = 1;
 
-    private static long lastSavedAt;
-    private static String lastSavedPath = "-";
-    private static String lastLoadNote = "本次启动尚未读取磁盘索引";
+    private static volatile long lastSavedAt;
+    private static volatile String lastSavedPath = "-";
+    private static volatile String lastLoadNote = "本次启动尚未读取磁盘索引";
 
     private IndexStore() {
     }
@@ -100,11 +102,54 @@ public final class IndexStore {
     // ------------------------------------------------------------------
     // 保存
 
-    /** @return null 表示成功，否则是不能保存的原因 */
+    /** 落盘专用的单线程：tick 线程只负责把索引抄成 Dto，GSON 序列化与写文件都在这里做（审查发现 T5） */
+    private static final ExecutorService SAVE_IO = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "warehouse-keeper-index-save");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
+     * 排队落盘：序列化与写文件都交给后台线程，不阻塞服务端 tick（审查发现 T5）。
+     *
+     * @return null 表示已受理，否则是不能保存的原因
+     */
     public static String save(WarehouseIndex index, MinecraftServer server) {
         if (!AppConfig.get().saveIndexToDisk) {
             return "配置中已关闭「保存索引到磁盘」（可用 /warehouse settings 修改）";
         }
+        Dto dto = snapshot(index, server);
+        Path f = fileFor(server);
+        int kinds = index.items.size();
+        long total = index.totalItems;
+        SAVE_IO.execute(() -> {
+            String err = write(dto, f, kinds, total);
+            if (err != null) {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 后台保存索引失败: {}", err);
+            }
+        });
+        return null;
+    }
+
+    /** 立刻写盘、返回前一定写完（关服与玩家手动 {@code /warehouse save} 用，会阻塞调用线程） */
+    public static String saveNow(WarehouseIndex index, MinecraftServer server) {
+        if (!AppConfig.get().saveIndexToDisk) {
+            return "配置中已关闭「保存索引到磁盘」（可用 /warehouse settings 修改）";
+        }
+        Dto dto = snapshot(index, server);
+        Path f = fileFor(server);
+        int kinds = index.items.size();
+        long total = index.totalItems;
+        try {
+            // 走同一个单线程：和排队中的后台保存天然串行，不会两个线程抢同一个 .tmp
+            return SAVE_IO.submit(() -> write(dto, f, kinds, total)).get();
+        } catch (Exception e) {
+            return "保存索引失败: " + e;
+        }
+    }
+
+    /** 把内存索引抄成可落盘的 Dto（必须在服务端线程做：读的是活对象） */
+    private static Dto snapshot(WarehouseIndex index, MinecraftServer server) {
         Dto dto = new Dto();
         dto.format = FORMAT;
         dto.modVersion = WarehouseMod.VERSION;
@@ -160,7 +205,11 @@ public final class IndexStore {
             dto.containers.add(cd);
         }
 
-        Path f = fileFor(server);
+        return dto;
+    }
+
+    /** 真正的写盘（在后台线程或 saveNow 的线程上跑）；@return null 表示成功 */
+    private static String write(Dto dto, Path f, int kinds, long totalItems) {
         try {
             Files.createDirectories(f.getParent());
             Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
@@ -176,7 +225,7 @@ public final class IndexStore {
         lastSavedAt = dto.savedAt;
         lastSavedPath = f.toString();
         WarehouseMod.LOGGER.info("[warehouse-keeper] 索引已保存到磁盘: {}  容器={} 物品种类={} 总数量={}",
-                f, dto.containers.size(), index.items.size(), index.totalItems);
+                f, dto.containers.size(), kinds, totalItems);
         return null;
     }
 
@@ -201,16 +250,21 @@ public final class IndexStore {
         try (Reader r = Files.newBufferedReader(f, StandardCharsets.UTF_8)) {
             dto = GSON.fromJson(r, Dto.class);
         } catch (Exception e) {
-            lastLoadNote = "索引文件读取失败: " + e;
+            // 读不动的索引文件不能被下一次 save() 覆盖掉：先留一份 .bak（审查发现 T1）
+            WorldStore.backupUnreadable(f);
+            lastLoadNote = "索引文件读取失败: " + e + "（原文件已另存为 " + f.getFileName() + ".bak）";
             return lastLoadNote;
         }
         if (dto == null || dto.containers == null) {
-            lastLoadNote = "索引文件为空或格式不符";
+            WorldStore.backupUnreadable(f);
+            lastLoadNote = "索引文件为空或格式不符（原文件已另存为 " + f.getFileName() + ".bak）";
             return lastLoadNote;
         }
         if (dto.format != FORMAT && dto.format != FORMAT_NO_SLOT_META
                 && dto.format != FORMAT_NO_META && dto.format != FORMAT_LEGACY) {
-            lastLoadNote = "索引文件为旧格式 (format=" + dto.format + ")，已忽略；请重新执行 /warehouse scan";
+            WorldStore.backupUnreadable(f);
+            lastLoadNote = "索引文件为旧格式 (format=" + dto.format + ")，已忽略并另存备份；"
+                    + "请重新执行 /warehouse scan";
             return lastLoadNote;
         }
         String upgraded = "";

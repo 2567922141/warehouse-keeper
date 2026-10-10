@@ -8,6 +8,7 @@ import com.ds.warehouse.web.WebSnapshot;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
@@ -54,6 +55,24 @@ public final class IndexRefresh {
     private static final int MAX_POLL_PER_ROUND = 512;
     /** {@link #sigOf} 的「这个坐标现在不是容器」返回值（真指纹恰好等于它的概率可以忽略） */
     private static final long MISSING = -1L;
+
+    /**
+     * 这口箱子自己 + 东西南北四个邻居所在的区块都加载了吗。
+     *
+     * <p>{@code isLoaded} 只查已加载表、不会加载任何东西。双联箱判定与找搭档都可能碰到
+     * 隔壁区块，所以读这口箱子之前先问一句（审查发现 S6）。
+     */
+    private static boolean sidesLoaded(ServerLevel level, BlockPos pos) {
+        if (!level.isLoaded(pos)) {
+            return false;
+        }
+        for (Direction d : new Direction[] {Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
+            if (!level.isLoaded(pos.relative(d))) {
+                return false;
+            }
+        }
+        return true;
+    }
     /** 增量更新跑这么多轮（约 1 分钟）就整份重算一次兜底，防止长期累积出小偏差 */
     private static final int FULL_REAGG_ROUNDS = 60;
 
@@ -266,15 +285,13 @@ public final class IndexRefresh {
             if (level == null || !level.isLoaded(old.pos)) {
                 continue;
             }
-            // 双联箱的另一半可能落在隔壁区块里：那边没加载时，读整箱（mapOf / partnerLoaded）
-            // 会把它顺手强载起来。tick 线程绝不使用会加载区块的读取 ⇒ 这一轮跳过，下一轮再试。
+            // 双联箱的另一半可能落在隔壁区块里：那边没加载时，读方块状态会把它顺手强载起来。
+            // 以前只在「当前这半还是双联箱」时才查搭档，可箱子被拆成单箱以后这一半照样要读
+            // 东西南北的邻居（判定是不是双联、找拆剩下的另一半），邻居没加载一样强载
+            // ⇒ 只要是箱子类容器，就把自己和四个水平邻居都问一遍（审查发现 S6）。
             BlockState state = level.getBlockState(old.pos);
-            if (state.getBlock() instanceof ChestBlock && state.hasProperty(ChestBlock.TYPE)
-                    && state.getValue(ChestBlock.TYPE) != ChestType.SINGLE) {
-                BlockPos other = ChestBlock.getConnectedBlockPos(old.pos, state);
-                if (!other.equals(old.pos) && !level.isLoaded(other)) {
-                    continue;
-                }
+            if (state.getBlock() instanceof ChestBlock && !sidesLoaded(level, old.pos)) {
+                continue;
             }
             long sig = sigOf(level, old.pos);
             if (sig == MISSING) {

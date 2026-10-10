@@ -123,16 +123,12 @@ public final class ClientPrefs {
 
     public void save() {
         normalize();
-        Path f = configPath();
-        try {
-            Files.createDirectories(f.getParent());
-            try (Writer w = Files.newBufferedWriter(f, StandardCharsets.UTF_8)) {
+        // 先写 .tmp 再原子替换：直接写目标文件，中途崩了/掉电会留下半截 json（审查发现 T2）
+        com.ds.warehouse.config.WorldStore.writeAtomic(configPath(), tmp -> {
+            try (Writer w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)) {
                 GSON.toJson(this, w);
             }
-        } catch (IOException e) {
-            com.ds.warehouse.WarehouseMod.LOGGER.warn(
-                    "[warehouse-keeper] 写入 warehouse-keeper-client.json 失败: {}", e.toString());
-        }
+        });
     }
 
     public void normalize() {

@@ -127,6 +127,72 @@ public final class WorldStore {
     }
 
     // ------------------------------------------------------------------
+    // 读写兜底（审查发现 T1/T2/T3）
+
+    /** 往临时文件里落内容的写法，允许抛异常 */
+    public interface Sink {
+        void write(Path tmp) throws Exception;
+    }
+
+    /**
+     * 先写 {@code <名字>.tmp} 再原子替换。
+     *
+     * <p>直接写目标文件的话，中途崩了/掉电会留下半截文件，下次启动整份数据都读不回来；
+     * 有些平台不支持原子改名，那就退回普通替换（至少内容已经完整落盘）。
+     *
+     * @return 是否写成功
+     */
+    public static boolean writeAtomic(Path f, Sink sink) {
+        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
+        try {
+            Files.createDirectories(f.getParent());
+            sink.write(tmp);
+            try {
+                Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicFailed) {
+                Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING);
+            }
+            return true;
+        } catch (Exception e) {
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] 写入 {} 失败: {}", f, e.toString());
+            try {
+                Files.deleteIfExists(tmp); // 别把半截文件留在目录里
+            } catch (IOException ignored) {
+                // 删不掉就算了，下次写会被 REPLACE_EXISTING 覆盖
+            }
+            return false;
+        }
+    }
+
+    /**
+     * 读不动的配置文件不能被下一次 save() 直接覆盖掉：先留一份 {@code .bak}（只留第一次的）。
+     *
+     * <p>以前只有 regions.json / players.json 这么做，其余几份配置是「解析失败 → 只 warn →
+     * 内存里当空表 → 下一次 save 覆盖原文件」，等于把玩家手改坏/写到一半的那份静默吃掉
+     * （审查发现 T1）。这里集中一份实现，所有按存档存的 json 共用。
+     *
+     * @return 备份文件；没备份成功时返回 null
+     */
+    public static Path backupUnreadable(Path f) {
+        if (f == null || !Files.isRegularFile(f)) {
+            return null;
+        }
+        Path bak = f.resolveSibling(f.getFileName() + ".bak");
+        try {
+            if (!Files.exists(bak)) {
+                Files.copy(f, bak, StandardCopyOption.COPY_ATTRIBUTES);
+                WarehouseMod.LOGGER.info("[warehouse-keeper] 已把读不动的 {} 另存为 {}",
+                        f.getFileName(), bak.getFileName());
+            }
+            return bak;
+        } catch (IOException e) {
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] 备份 {} 失败（继续按默认值处理）: {}",
+                    f.getFileName(), e.toString());
+            return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 一次性迁移（0.15.x 及以前的老文件）
 
     /** 旧 index/ 目录里最新的那个索引文件 = 最近玩过的存档 */

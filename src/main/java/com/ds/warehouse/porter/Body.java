@@ -29,8 +29,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * 搬运工的「身体」——用 Carpet 的 {@code /player} 指令生成真正的假人玩家。
@@ -169,6 +171,41 @@ public final class Body {
     /** 假人副手的格子号（举着表演道具的那格，原版捡东西不会用）；没有假人时返回 -1 */
     public static int heldSlot(MinecraftServer server, String name) {
         return get(server, name) == null ? -1 : 40;
+    }
+
+    /** 死掉的假人名字，等 {@code Porter.tick} 来收尾（收尾要改箱子，不能放在死亡回调里做） */
+    private static final Queue<String> DEAD = new ConcurrentLinkedQueue<>();
+
+    /**
+     * 假人死了（不是我们杀的）：先把副手摘干净，再登记进队列。
+     *
+     * <p>为什么必须卡在「死的那一刻」：副手上举的是搬运工账本里那份物品的**真实拷贝**
+     * （见 {@link #hold}）。玩家用 Carpet 的 {@code /player X kill}、掉虚空、或别的模组把它
+     * 弄死时，这一格会跟着掉落 —— 等于凭空多出一份（审查发现 S2）。Vanilla 把
+     * {@code ServerLivingEntityEvents.ALLOW_DEATH} 挂在 {@code LivingEntity#die} 开头，
+     * 早于 {@code dropAllDeathLoot}，所以在这里清还来得及。
+     *
+     * <p>正在取货的那只假人半路没了，本单要按「放弃 + 把已取出的东西放回仓库」收尾；
+     * 那会改箱子，放在死亡回调里做不安全，所以只登记，交给 {@code Porter.tick}。
+     */
+    public static void onDeath(ServerPlayer player) {
+        if (player == null) {
+            return;
+        }
+        String name = player.getName().getString();
+        if (Bots.of(name) == null) {
+            return; // 不是我们的假人（普通玩家死了不关我们的事）
+        }
+        if (player.level() instanceof ServerLevel level) {
+            hold(level.getServer(), name, null);
+        }
+        DEAD.add(name);
+        WarehouseMod.LOGGER.warn("[warehouse-keeper] 假人 {} 被别的来源弄死了，副手已清空", name);
+    }
+
+    /** 取出一条「假人死了」的记录（没有就返回 null） */
+    public static String pollDead() {
+        return DEAD.poll();
     }
 
     /**
@@ -314,6 +351,13 @@ public final class Body {
 
     /** 这个位置空不空（没有碰撞箱 = 实体能待在里面） */
     private static boolean free(ServerLevel lvl, BlockPos p) {
+        // 区块没加载时一律当「站不了」：getBlockState 会把区块顺手加载起来，
+        // 而 standby → containerSpot/centerOf → standable 这条路每个假人每 tick 都会走，
+        // 玩家跑去没去过的地图时等于替他强载一堆区块（审查发现 S3）。
+        // isLoaded 只是查已加载表，不会加载任何东西。
+        if (!lvl.isLoaded(p)) {
+            return false;
+        }
         return lvl.getBlockState(p).getCollisionShape(lvl, p).isEmpty();
     }
 
@@ -379,6 +423,9 @@ public final class Body {
         BlockPos hi = r.max();
         int x = (lo.getX() + hi.getX()) / 2;
         int z = (lo.getZ() + hi.getZ()) / 2;
+        if (!lvl.isLoaded(new BlockPos(x, lo.getY(), z))) {
+            return null; // getHeight 会加载区块，没加载就当这个区域暂时没有落点（审查发现 S3）
+        }
         Integer y = standableY(lvl, x, z, lvl.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z));
         if (y == null) {
             return null;
@@ -414,6 +461,9 @@ public final class Body {
         for (ContainerRecord rec : WarehouseMod.INDEX.containers.values()) {
             if (rec == null || !r.dimension.equals(rec.dimension) || !r.contains(rec.pos)) {
                 continue;
+            }
+            if (!lvl.isLoaded(rec.pos)) {
+                continue; // 这口箱子所在区块没加载：先看别的（isLoaded 不会加载区块，见 S3）
             }
             long dx = rec.pos.getX() - (long) cx;
             long dz = rec.pos.getZ() - (long) cz;
@@ -520,8 +570,14 @@ public final class Body {
 
     /** 箱子「前面」那一格 —— 玩家平时开箱子站的地方 */
     public static double[] chestSpot(ServerLevel level, BlockPos pos) {
-        BlockState st = level.getBlockState(pos);
-        Direction d = st.hasProperty(ChestBlock.FACING) ? st.getValue(ChestBlock.FACING) : Direction.SOUTH;
+        // 区块没加载就不读方块（getBlockState 会强载）；默认朝南，当个大致落点足够（审查发现 S3）
+        Direction d = Direction.SOUTH;
+        if (level.isLoaded(pos)) {
+            BlockState st = level.getBlockState(pos);
+            if (st.hasProperty(ChestBlock.FACING)) {
+                d = st.getValue(ChestBlock.FACING);
+            }
+        }
         BlockPos s = pos.relative(d);
         return new double[] { s.getX() + 0.5, s.getY(), s.getZ() + 0.5 };
     }

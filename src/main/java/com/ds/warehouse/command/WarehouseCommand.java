@@ -182,7 +182,8 @@ public final class WarehouseCommand {
                                             // （只删「箱子已经不在」的标签），没有按区域清理的方法；
                                             // 而这些箱子物理上还在，标签得由玩家用 /warehouse tag clear 或 tag prune 清理
                                             Audit.add(adminName(ctx.getSource()), "删仓库", "删掉了仓库「" + name + "」");
-                                            send(ctx.getSource(), "已删除仓库 " + name);
+                                            send(ctx.getSource(), "已删除仓库 " + name
+                                                    + "（区域内箱子的标签没动，需要的话用 /warehouse tag prune 清一遍）");
                                             return 1;
                                         }))))
                 .then(Commands.literal("scan").requires(WarehouseCommand::admin)
@@ -213,7 +214,8 @@ public final class WarehouseCommand {
                     return 1;
                 }))
                 .then(Commands.literal("save").requires(WarehouseCommand::admin).executes(ctx -> {
-                    String err = IndexStore.save(WarehouseMod.INDEX, ctx.getSource().getServer());
+                    // 玩家主动要求保存：当场写完再回话，回显才不是空头支票
+                    String err = IndexStore.saveNow(WarehouseMod.INDEX, ctx.getSource().getServer());
                     send(ctx.getSource(), err != null ? err : "索引已保存到磁盘");
                     showIndexInfo(ctx.getSource());
                     return err == null ? 1 : 0;

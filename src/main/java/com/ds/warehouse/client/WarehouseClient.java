@@ -31,6 +31,9 @@ public class WarehouseClient implements ClientModInitializer {
 
     private static KeyMapping openKey;
 
+    /** 有人按了 /warehousegui：登记下来，等聊天界面关掉后的下一个 tick 再开（见 requestOpen） */
+    private static volatile boolean guiPending;
+
     @Override
     public void onInitializeClient() {
         // 服务端推来的仓库快照（区域 + 每个仓库里有什么）。必须在客户端入口注册，
@@ -73,17 +76,25 @@ public class WarehouseClient implements ClientModInitializer {
             RegionBorder.validate();
             RegionBorder.clientTick();
             QueryClient.tick();
+            // 指令请求开的界面：这一 tick 聊天界面已经自己关掉了，现在开才不会被它顶掉
+            if (guiPending) {
+                guiPending = false;
+                if (client.gui == null || client.gui.screen() == null
+                        || client.gui.screen() instanceof WarehouseScreen) {
+                    open(client);
+                }
+            }
         });
 
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommands.literal("warehousegui")
                     .executes(ctx -> {
-                        open(Minecraft.getInstance());
+                        requestOpen();
                         return 1;
                     }));
             dispatcher.register(ClientCommands.literal("whg")
                     .executes(ctx -> {
-                        open(Minecraft.getInstance());
+                        requestOpen();
                         return 1;
                     }));
         });
@@ -130,6 +141,18 @@ public class WarehouseClient implements ClientModInitializer {
         if (name != null && !name.isBlank()) {
             out.put(id, name);
         }
+    }
+
+    /**
+     * 请求打开界面：只登记，真正打开推迟到下一个客户端 tick。
+     *
+     * <p><b>不能在客户端指令回调里直接 setScreenAndShow</b>：客户端指令是在聊天界面的
+     * 回车处理里同步执行的，原版紧接着就会自己 {@code Gui.setScreen(null)}
+     * （{@code ChatScreen.closeOnSubmit}），刚开的界面立刻被顶掉 —— 表现就是
+     * 「敲了 /warehousegui，界面闪一下又回到游戏」。按键那条路本来就在 tick 里，不受影响。
+     */
+    public static void requestOpen() {
+        guiPending = true;
     }
 
     /** 打开界面。 */

@@ -19,7 +19,7 @@ import java.util.TreeSet;
  * 仓库索引：容器 → 物品 的双向聚合。
  *
  * 运行时是纯内存结构（查询要快就必须在内存里）。持久化交给 {@link IndexStore}：
- * 存到 config/warehouse-keeper/index/，**不写 world/**。
+ * 存到存档目录里的 warehouse-keeper/index.json（1.1.7 起随存档走）。
  */
 public final class WarehouseIndex {
 

@@ -425,11 +425,13 @@ public final class ContainerTagBar {
         if (!holder.open || holder.listH <= 0 || holder.listW <= 0) {
             return;
         }
+        // 箱子标签栏可能先于仓库面板出现（面板没开过时 Palette 还是默认主题）⇒ 这里也按偏好同步一次
+        Palette.apply(ClientPrefs.theme());
         Minecraft mc = Minecraft.getInstance();
         int x1 = holder.listX + holder.listW;
         int y1 = holder.listY + holder.listH;
-        g.fill(holder.listX, holder.listY, x1, y1, 0xFF141B26);
-        border(g, holder.listX, holder.listY, x1, y1, 0xFF4E8BD8);
+        g.fill(holder.listX, holder.listY, x1, y1, Palette.listBgAlt());
+        border(g, holder.listX, holder.listY, x1, y1, Palette.accentBorder());
 
         holder.hover = indexAt(holder, mouseX, mouseY);
         String current = currentCategory(holder);
@@ -444,9 +446,9 @@ public final class ContainerTagBar {
             int w = holder.listW - 2;
             boolean chosen = keys.get(index).equals(current);
             if (chosen) {
-                g.fill(x, y, x + w, y + LINE_H, 0xFF1D3350);
+                g.fill(x, y, x + w, y + LINE_H, Palette.rowBgSel());
             } else if (index == holder.hover) {
-                g.fill(x, y, x + w, y + LINE_H, 0xFF24313F);
+                g.fill(x, y, x + w, y + LINE_H, Palette.rowBgAlt());
             }
             // 显示名走 Categories.displayName（创造栏页签的中文名 / 旧类目名 / 「其他」），
             // 模组页签名可能很长，按清单宽度用既有的 fit 截断
@@ -454,14 +456,14 @@ public final class ContainerTagBar {
             String text = fit(chosen ? "✓ " + name : name, w - 4);
             int tx = x + Math.max(0, (w - mc.font.width(text)) / 2);
             int ty = y + Math.max(0, (LINE_H - mc.font.lineHeight) / 2);
-            g.text(mc.font, text, tx, ty, chosen ? 0xFFFFFFFF : 0xFFD6DEEA);
+            g.text(mc.font, text, tx, ty, chosen ? Palette.textTitle() : Palette.textBodyHud());
         }
         int total = keys.size();
         if (holder.footer > 0) {
             // 计数条画在预留的页脚里，别压在最后一行上
             String more = (holder.scroll + 1) + "~" + (holder.scroll + holder.rows) + " / " + total;
             g.text(mc.font, more, x1 - mc.font.width(more) - 3,
-                    holder.listY + holder.listH - holder.footer + 1, 0xFF8FA0B8);
+                    holder.listY + holder.listH - holder.footer + 1, Palette.textLabel());
         }
     }
 

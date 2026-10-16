@@ -9,7 +9,7 @@ import net.minecraft.resources.Identifier;
  * 服务端 → 客户端：仓库区域 + 索引快照。
  *
  * <p>为什么需要它：游戏内面板原来直接读客户端本机的
- * {@code config/warehouse-keeper/regions.json}，只有在「单机 / 客户端与服务端同一个进程」
+ * {@code <存档目录>/warehouse-keeper/regions.json}，只有在「单机 / 客户端与服务端同一个进程」
  * 时才成立。玩家连别人的服务器时，客户端上既没有那个文件、也没有服务端的索引，
  * 面板就空了（旧版本干脆显示「连的是别人的服务器，看不了」）。
  *

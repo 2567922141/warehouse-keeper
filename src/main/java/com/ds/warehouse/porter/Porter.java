@@ -52,7 +52,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * 线程上改。网页线程看不到索引（索引是可变 HashMap），所以网页下单只把「要什么」原样排队，
  * 由 tick 线程去解析。
  *
- * <p><b>存档安全</b>：全程不新增任何注册项、不写 world/。从箱子里取出来的东西，
+ * <p><b>存档安全</b>：全程不新增任何注册项、不往存档里写原版不认识的内容。从箱子里取出来的东西，
  * 只要还没交到玩家手上，就一定记在 {@link #carried} 里；出错/超时/关服都会放回原箱子。
  */
 public final class Porter {

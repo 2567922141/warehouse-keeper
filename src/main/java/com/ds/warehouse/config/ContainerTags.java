@@ -52,8 +52,8 @@ import java.util.Map;
  * <p>键＝归一化坐标（{@link Scanner#canonical}）＋维度，与索引同一套 key 规则 ⇒
  * 双联箱两半天然共享一条标签（开哪一半都是同一个标签）。
  *
- * <p>文件：{@code config/warehouse-keeper/worlds/<存档名>/container-tags.json}
- * （和 regions.json / homes.json 同目录同规则；标签只是 JSON，<b>绝不碰容器内容</b>）。
+ * <p>文件：{@code <存档目录>/warehouse-keeper/container-tags.json}（1.1.7 起随存档走；
+ * 和 regions.json / homes.json 同目录同规则；标签只是 JSON，<b>绝不碰容器内容</b>）。
  */
 public final class ContainerTags {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();

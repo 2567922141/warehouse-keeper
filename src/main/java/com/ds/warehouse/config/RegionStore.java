@@ -18,9 +18,9 @@ import java.util.Map;
 /**
  * 仓库区域定义 + 持久化。
  *
- * 存储位置：<游戏实例>/config/warehouse-keeper/worlds/&lt;存档目录名&gt;/regions.json
- * （每个存档一份；0.15.x 及以前放在 config 根下的老文件会在进存档时自动迁移过来）
- * 刻意放在 config 而不是存档目录里 —— 卸载模组后存档里不留任何残留。
+ * 存储位置：&lt;存档目录&gt;/warehouse-keeper/regions.json（每个存档一份，1.1.7 起随存档走）
+ * （更早放在 config/warehouse-keeper/worlds/&lt;存档目录名&gt;/ 或 config 根下，进存档时会自动迁移过来）
+ * 数据放在存档里 ⇒ 删掉存档就一起删掉，同名重建也不会继承上一个存档的仓库区域。
  */
 public final class RegionStore {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();

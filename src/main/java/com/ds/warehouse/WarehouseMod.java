@@ -42,7 +42,8 @@ import org.slf4j.LoggerFactory;
  * 设计约束（见实现手册）：
  *  - 只读为主，不向存档写入任何自定义内容（无自定义方块/物品/实体）。
  *  - 一切容器一律按 net.minecraft.world.Container 接口处理，不针对任何模组特判。
- *  - 区域定义写在 config/warehouse-keeper/，不写进 world/。
+ *  - 仓库数据（区域/名册/归位记忆/标签/索引）写在存档目录的 warehouse-keeper/ 里，
+ *    1.1.7 起随存档走：删存档即删数据，同名重建也不会继承。
  */
 public class WarehouseMod implements ModInitializer {
     public static final String MOD_ID = "warehouse-keeper";
@@ -54,7 +55,7 @@ public class WarehouseMod implements ModInitializer {
             .map(c -> c.getMetadata().getVersion().getFriendlyString())
             .orElse("dev");
 
-    /** 全局索引（运行时在内存里；开档会从 config/warehouse-keeper/index/ 恢复） */
+    /** 全局索引（运行时在内存里；开档会从存档目录的 warehouse-keeper/index.json 恢复） */
     public static final WarehouseIndex INDEX = new WarehouseIndex();
 
     /**

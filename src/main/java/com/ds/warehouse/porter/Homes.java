@@ -28,7 +28,7 @@ import java.util.Map;
  * <p>所以这里额外记一份「物品 → 箱子」的归属：它只增不减，跟箱子里还剩多少无关，
  * 而且会<b>存到硬盘</b>，关服重开也还记得。
  *
- * <p>文件写在 {@code config/warehouse-keeper/homes.json}，不进存档目录。
+ * <p>文件写在存档目录里的 {@code warehouse-keeper/homes.json}（1.1.7 起随存档走）。
  */
 public final class Homes {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();

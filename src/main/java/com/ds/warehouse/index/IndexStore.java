@@ -44,9 +44,9 @@ import java.util.concurrent.Executors;
 /**
  * 索引持久化。
  *
- * 存放位置：&lt;游戏实例&gt;/config/warehouse-keeper/worlds/&lt;存档目录名&gt;/index.json
- * （0.15.x 及以前放在 index/&lt;存档目录名&gt;.json，进存档时会自动迁移过来）
- * 刻意**不放进 world/** —— 卸载模组后存档零残留，这是本项目第一号硬性约束。
+ * 存放位置：&lt;存档目录&gt;/warehouse-keeper/index.json（1.1.7 起数据随存档走）
+ * （更早放在 config/warehouse-keeper/worlds/&lt;存档目录名&gt;/，进存档时会自动迁移过来）
+ * 数据放在存档目录里 ⇒ 删存档即删索引，同名重建不会继承（1.1.7 起）。
  *
  * 只保存索引真正用到的信息（物品 id + 数量 + 附魔 / 自定义名索引），不序列化 ItemStack：
  *   - ItemStack 的组件 / NBT 用 Gson 直接序列化既脆弱又没必要；

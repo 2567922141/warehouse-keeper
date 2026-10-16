@@ -32,7 +32,7 @@ import java.util.List;
  *   <li>只认**本模组名册**里的名字（{@link Bots#has(String)}，忽略大小写）。别的模组或玩家手动
  *       {@code /player} 出来的假人不在名册里，照样占名额 —— 刻意不越权替别人做决定；</li>
  *   <li>搬运工仍然会出现在玩家列表 / Tab / {@code /list} 里（他们确实是在线的玩家），本 Mixin 只改满员判定；</li>
- *   <li>名册在 {@code SERVER_STARTED} 时从 {@code config/warehouse-keeper/bots.json} 读入，
+ *   <li>名册在 {@code SERVER_STARTED} 时从存档目录的 {@code warehouse-keeper/bots.json} 读入，
  *       而 {@code canPlayerLogin} 只可能在服务端启动后发生，所以不存在"名册还没加载"的窗口；</li>
  *   <li>{@code require = 0}：将来原版若改动这段代码，注入点找不到时只是**静默失效**（回到原版行为），
  *       绝不会因为注入失败而让服务端起不来。</li>

@@ -15,7 +15,8 @@ import java.nio.file.Path;
  * 全局设置。
  *
  * 存储位置：&lt;游戏实例&gt;/config/warehouse-keeper/settings.json
- * 和 regions.json 一样放在 config 而不是存档目录 —— 卸载模组后存档零残留。
+ * 这里是<b>实例级</b>设置（网页端口、自动扫描等），不随存档走；
+ * 存档数据（区域 / 名册 / 归位记忆 / 标签 / 索引）自 1.1.7 起放在存档目录的 warehouse-keeper/ 里。
  */
 public final class AppConfig {
 

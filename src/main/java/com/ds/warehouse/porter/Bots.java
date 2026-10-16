@@ -26,7 +26,7 @@ import java.util.List;
  * {@code WarehouseBot2}、{@code WarehouseBot3}……名字固定，UUID 由名字派生，
  * 关服重开还是同一个人，不会每次新建。
  *
- * <p>名册写在 {@code config/warehouse-keeper/bots.json}，不进存档目录。
+ * <p>名册写在存档目录里的 {@code warehouse-keeper/bots.json}（1.1.7 起随存档走，换存档不会串名册）。
  */
 public final class Bots {
 

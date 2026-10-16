@@ -45,6 +45,34 @@ public final class ClientPrefs {
      */
     public String tagBarDock = "auto";
 
+    /**
+     * 「设置」页 · 是否记住上次打开的页面（顶级页签 + 二级页签）。
+     *
+     * <p>默认开：下次打开面板直接回到上次那一页。关掉后每次打开都从「仓库 · 概览」开始。
+     * 存在客户端 config 里，所以「记住」这件事是每个玩家各记各的。
+     */
+    public boolean rememberLastPage = true;
+
+    /** 「设置」页 · 界面密度：{@code false} = 舒适（默认尺寸），{@code true} = 紧凑（行高与间距整体收紧） */
+    public boolean compactDensity = false;
+
+    /**
+     * 「设置」页 · 界面配色主题：下标对应 {@code Palette.THEME_NAMES}。
+     *
+     * <p>{@code 0} = 深海蓝，就是加这个设置项之前的配色；其它主题由 {@code Palette} 按 HSL 变换算出来。
+     * 越界值一律回落 0（见 {@link #normalize()}）。
+     */
+    public int theme = 0;
+
+    /** 上次打开的顶级页签下标（{@link #rememberLastPage} 关着时也照写，只是不读回来） */
+    public int lastTab = 0;
+
+    /** 上次打开的二级页签下标 */
+    public int lastSub = 0;
+
+    /** 每个顶级页签各自停在哪一个二级页签（下标 = 页签下标，长度按页签上限 5 固定） */
+    public int[] lastSubOf = new int[5];
+
     public static ClientPrefs get() {
         ClientPrefs c = instance;
         if (c == null) {
@@ -66,6 +94,21 @@ public final class ClientPrefs {
      */
     public static String dock() {
         return get().tagBarDock;
+    }
+
+    /** 「设置」页开关的读取口：是否记住上次打开的页面（给界面用，省得到处 {@code ClientPrefs.get()}） */
+    public static boolean rememberLastPage() {
+        return get().rememberLastPage;
+    }
+
+    /** 「设置」页「界面密度」的读取口：{@code true} = 紧凑 */
+    public static boolean compactDensity() {
+        return get().compactDensity;
+    }
+
+    /** 「设置」页「界面配色」的读取口：下标对应 {@code Palette.THEME_NAMES} */
+    public static int theme() {
+        return get().theme;
     }
 
     /** 停靠值 → 面板上的中文名；未知值当 auto */
@@ -133,5 +176,24 @@ public final class ClientPrefs {
 
     public void normalize() {
         tagBarDock = normalizeDock(tagBarDock);
+        // 配色主题：数量与 Palette.THEME_NAMES 一致（4 套），越界回落默认
+        theme = clamp(theme, 0, 3);
+        // 页签下标都夹在合理范围内：配置文件被手改、或以后页签数量变了，也只会回到边界值
+        lastTab = clamp(lastTab, 0, 4);
+        lastSub = clamp(lastSub, 0, 15);
+        if (lastSubOf == null || lastSubOf.length != 5) {
+            int[] fixed = new int[5];
+            if (lastSubOf != null) {
+                System.arraycopy(lastSubOf, 0, fixed, 0, Math.min(lastSubOf.length, 5));
+            }
+            lastSubOf = fixed;
+        }
+        for (int i = 0; i < lastSubOf.length; i++) {
+            lastSubOf[i] = clamp(lastSubOf[i], 0, 15);
+        }
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 }

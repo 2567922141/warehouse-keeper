@@ -7,6 +7,7 @@ import com.ds.warehouse.config.RegionStore;
 import com.ds.warehouse.index.ContainerRecord;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.Scanner;
+import com.ds.warehouse.index.Variants;
 import com.ds.warehouse.index.WarehouseIndex;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.ItemStack;
@@ -548,12 +549,14 @@ public final class SnapshotSync {
      */
     private static List<ItemDto> variantItems(WebSnapshot.ItemRow row) {
         List<ItemDto> out = new ArrayList<>();
-        Map<String, ItemDto> byEnch = new LinkedHashMap<>();
+        Map<String, ItemDto> byKey = new LinkedHashMap<>();
         Map<String, WebSnapshot.LocRow> firstLoc = new LinkedHashMap<>();
         long resolved = 0;
         for (WebSnapshot.LocRow loc : row.locations) {
+            String key = row.id;
             String ench = "";
             String custom = "";
+            String realName = null;
             int count = 0;
             boolean found = false;
             ContainerRecord rec = WarehouseMod.INDEX.containers.get(
@@ -564,8 +567,12 @@ public final class SnapshotSync {
                         continue;
                     }
                     ItemStack st = ss.stack();
+                    // I5-B1：按**组件**分行（不再只按附魔）—— 药水/地图/染色装备/烟花/成书
+                    // 这些同 id 不同数据的东西各占一行，名字也改用真实 ItemStack 取。
+                    key = Variants.keyOf(st);
                     ench = Scanner.enchantText(st);
                     custom = Scanner.customNameText(st);
+                    realName = rowName(st, row.name);
                     count = st.getCount();
                     found = true;
                     break;
@@ -574,14 +581,15 @@ public final class SnapshotSync {
             if (found) {
                 resolved += count;
             }
-            ItemDto dto = byEnch.get(ench);
+            ItemDto dto = byKey.get(key);
             if (dto == null) {
                 dto = new ItemDto();
                 dto.id = row.id;
-                dto.name = row.name;
+                dto.variant = Variants.isVariantKey(key) ? key : "";
+                dto.name = realName == null ? row.name : realName;
                 dto.ench = ench;
-                byEnch.put(ench, dto);
-                firstLoc.put(ench, loc);
+                byKey.put(key, dto);
+                firstLoc.put(key, loc);
                 out.add(dto);
             }
             dto.count += count;
@@ -592,7 +600,7 @@ public final class SnapshotSync {
         }
         long rest = row.count - resolved;
         if (rest > 0 || out.isEmpty()) {
-            ItemDto plain = byEnch.get("");
+            ItemDto plain = byKey.get(row.id);
             if (plain == null) {
                 plain = new ItemDto();
                 plain.id = row.id;
@@ -604,12 +612,34 @@ public final class SnapshotSync {
         }
         // 处数只有遍历完才知道，位置文案最后重新拼一遍（首格 + 这个变体自己的处数）
         for (Map.Entry<String, WebSnapshot.LocRow> e : firstLoc.entrySet()) {
-            ItemDto dto = byEnch.get(e.getKey());
+            ItemDto dto = byKey.get(e.getKey());
             if (dto != null) {
                 dto.loc = locText(e.getValue(), dto.refs);
             }
         }
         return out;
+    }
+
+    /**
+     * 一行的显示名：用**真实 ItemStack** 取（药水会得到「抗火药水」而不是「药水」），再缀上组件注解。
+     *
+     * <p>取名要过 try/catch：老服务端/异常数据里可能取不到名字，取不到就退回索引里缓存的名字。
+     */
+    private static String rowName(ItemStack st, String fallback) {
+        String base = fallback;
+        try {
+            String hover = Variants.displayName(st);
+            if (hover != null && !hover.isEmpty()) {
+                base = hover;
+            }
+        } catch (Throwable ignored) {
+            // 用 fallback
+        }
+        if (base == null) {
+            base = "";
+        }
+        String note = Variants.note(st);
+        return note.isEmpty() ? base : base + " · " + note;
     }
 
     /**
@@ -805,6 +835,16 @@ public final class SnapshotSync {
          * 按字段名对拷，名字差一个字母（例如写 {@code cat}）就会永远解析成空串，取货页照样只剩「其他」。
          */
         String category = "";
+        /**
+         * 1.2.1（I5-B1）：这一行的**组件变体键**（{@link com.ds.warehouse.index.Variants#keyOf(ItemStack)}），
+         * 例如 {@code minecraft:potion@1a2b3c4d5e}；空 = 这行没有组件差异。
+         *
+         * <p>同 id 不同数据的物品（药水/地图/染色装备/烟花/成书…）每种组件组合一行，客户端点单时把这个键
+         * 填进取货框，服务端按组件逐格比对后只取对得上的那些 —— 与附魔行用的是同一套「点哪行取哪行」思路。
+         *
+         * <p><b>字段名必须与 {@code ClientSnapshot.Item.variant} 一字不差</b>：两边用 Gson 按字段名对拷。
+         */
+        String variant = "";
     }
 
     static final class BotDto {

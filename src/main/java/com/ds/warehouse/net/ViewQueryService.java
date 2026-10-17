@@ -110,7 +110,9 @@ public final class ViewQueryService {
         ServerPlayNetworking.registerGlobalReceiver(ItemNamesPayload.TYPE, (payload, context) -> {
             // 名字表是**全局静态表**（Names.CLIENT 被整表替换），会同时影响 /warehouse list、find、
             // 面板显示与取货的名字解析，所以只收管理员推的：否则任何玩家一条包就能把全服的物品名改掉。
-            if (!Admin.isAdmin(WarehouseMod.server(), context.player())) {
+            // W-06：用这条包自己的 context 拿服务器实例，别用全局静态的 WarehouseMod.server() ——
+            // 静态那个是「最近一次 tick 记下的」，在专用服务端 + 集成服务端交错时可能指向另一个实例。
+            if (!Admin.isAdmin(context.server(), context.player())) {
                 WarehouseMod.LOGGER.info("[warehouse-keeper] 已忽略非管理员推来的名字表（玩家 {}）",
                         context.player().getName().getString());
                 return;

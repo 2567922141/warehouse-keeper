@@ -6,6 +6,7 @@ import com.ds.warehouse.config.RegionStore;
 import com.ds.warehouse.index.ContainerRecord;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.Scanner;
+import com.ds.warehouse.index.Variants;
 import com.ds.warehouse.index.WarehouseIndex;
 import com.ds.warehouse.util.Categories;
 import com.ds.warehouse.util.Names;
@@ -170,7 +171,7 @@ public final class WebSnapshot {
                 String id = ItemIds.of(ss.stack());
                 Agg a = aggs.get(id);
                 if (a == null) {
-                    a = new Agg(id, ss.stack().getHoverName().getString());
+                    a = new Agg(id, Variants.displayName(ss.stack()));
                     aggs.put(id, a);
                 }
                 a.total += count;
@@ -599,7 +600,7 @@ public final class WebSnapshot {
         SlotRow(ContainerRecord.StoredStack ss) {
             this.slot = ss.slot();
             this.id = ItemIds.of(ss.stack());
-            this.name = ss.stack().getHoverName().getString();
+            this.name = Variants.displayName(ss.stack());
             this.count = ss.stack().getCount();
             this.category = Categories.of(id);
             // 附魔 / 自定义名只有 ItemStack 上有，id + 数量之外的信息都从这里现取（优化11）

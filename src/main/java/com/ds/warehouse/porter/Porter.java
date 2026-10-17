@@ -6,6 +6,7 @@ import com.ds.warehouse.config.RegionStore;
 import com.ds.warehouse.index.ItemIds;
 import com.ds.warehouse.index.IndexRefresh;
 import com.ds.warehouse.index.Scanner;
+import com.ds.warehouse.index.Variants;
 import com.ds.warehouse.index.WarehouseIndex;
 import com.ds.warehouse.util.Audit;
 import com.ds.warehouse.util.Names;
@@ -105,6 +106,13 @@ public final class Porter {
          * 连接；空串 = 不限附魔（老行为）。取货时逐格比对这一格的附魔组合，对不上就跳过。
          */
         public String ench = "";
+        /**
+         * 组件变体筛选（1.2.1）：{@link com.ds.warehouse.index.Variants#keyOf(ItemStack)} 给的键。
+         *
+         * <p>空串 = 不限组件（老行为）。有值时取货只挑组件哈希对得上的格子，
+         * 「抗火药水」不会发出「夜视药水」。
+         */
+        public String variant = "";
         /** 接这单的假人名字（还没派出去就是空串） */
         public String botName = "";
         public long finishedAt;
@@ -156,6 +164,30 @@ public final class Porter {
     /** 正在执行这一单的假人名字（空 = 还没派出去） */
     private static String activeBotName = "";
     private static final List<Carry> carried = new ArrayList<>();
+    /**
+     * 上一次真正举过「表演副本」的假人名（W-03 兜底自检用）。
+     *
+     * <p>正常路径由 {@link #finish} 摘副手；但「假人不是走 die 而是被直接 discard()」
+     * （区块卸载、别的模组强删实体）这类路径不会经过任何清理点，副手里那份
+     * {@code carried.get(0).stack()} 的真实拷贝就会掉成真物品 = 凭空多一份。
+     */
+    private static String lastCarrier = "";
+    private static int carryCheckTicks;
+    /** I5-opt1：最近一次成功下单的「实际数量」与「库存不足说明」（命令回话用，同一线程顺序调用） */
+    private static volatile int lastPlaced;
+    private static volatile String lastPlacedNote;
+
+    /** 最近一次成功下单的实际数量（库存不足时 = 库存数量，不是玩家要的数量） */
+    public static int lastPlacedCount() {
+        return lastPlaced;
+    }
+
+    /** 取走最近一次下单的库存不足说明（读一次即清；null = 足量下单或没下单） */
+    public static String takePlacedNote() {
+        String n = lastPlacedNote;
+        lastPlacedNote = null;
+        return n;
+    }
     private static final List<Region> touchedRegions = new ArrayList<>();
     private static List<WarehouseIndex.SlotRef> refs = List.of();
     private static int refIndex;
@@ -195,7 +227,7 @@ public final class Porter {
                     ? "仓库索引为空，请先执行 /warehouse scan。"
                     : "仓库中没有「" + shown + "」这件物品。";
         }
-        return enqueue(player.getName().getString(), player.getUUID(), hit.entry, count, ench);
+        return enqueue(player.getName().getString(), player.getUUID(), hit.entry, count, ench, hit.variantKey);
     }
 
     /** 网页下单：物品名由 tick 线程解析（HTTP 线程不碰可变的索引） */
@@ -204,34 +236,36 @@ public final class Porter {
     }
 
     private static String enqueue(String playerName, UUID playerId, WarehouseIndex.ItemEntry entry, int count,
-                                  String ench) {
+                                  String ench, String variant) {
         if (PENDING.size() >= MAX_PENDING) {
-            return "还有 " + PENDING.size() + " 个订单未完成，请稍后再下单。";
+            return "还有 " + PENDING.size() + " 单没送完，稍后再下单。";
         }
         if (entry.total <= 0) {
-            return "仓库中已没有「" + entry.displayName + "」。";
+            return "仓库里没有「" + entry.displayName + "」了。";
         }
         // F-D5-1：这单货所在仓库没有任何假人值守时**当场**说清楚，
         // 不要先回「已下单」再在 tick 里异步失败（玩家会在 /warehouse porter 里才发现）
         List<String> where = itemRegions(entry);
         if (where.isEmpty()) {
-            return "「" + entry.displayName + "」不在任何仓库范围内，无法配送。";
+            return "「" + entry.displayName + "」不在仓库范围内。";
         }
         if (!anyBotOn(where)) {
-            return "仓库中「" + entry.displayName + "」位于 " + String.join("、", where)
-                    + "，但没有假人值守该仓库。请先使用 /warehouse bot assign <假人> " + where.get(0)
-                    + " 指定后再下单。";
+            return "「" + entry.displayName + "」在 " + String.join("、", where)
+                    + "，但那间仓库没假人（/warehouse bot assign 指派）";
         }
-        // 1.1.4 · 严格库存语义（用户拍板选 A）：
-        // 要的比仓库里的多就**不下单**并明确说明，不再像以前那样静默按库存截断
-        //（以前玩家以为拿了 N 个，实际只拿到库存那么多，与「不足要提示、不得少拿」冲突）。
+        // 1.1.4 当时选的是「严格库存语义」（要的比仓库里多就不下单）；
+        // I5-opt1（issue #5 优化 1，用户拍板「全修」）改成**有多少给多少 + 明确提示**：
+        // 库存不足时按实际库存下单，并在回话与订单说明里写清「只给了 N 个」，
+        // 不再像以前那样整单拒绝（玩家要 10 个、仓库只有 1 个时，那 1 个也不给了）。
         if (count > MAX_ORDER) {
-            return "一次最多下单 " + MAX_ORDER + " 个（你说了 " + count + " 个），没有下单。";
+            return "一次最多 " + MAX_ORDER + " 个。";
         }
         int want = count <= 0 ? 1 : count;
+        String shortNote = null;
         if (want > entry.total) {
-            return "仓库里「" + entry.displayName + "」只有 " + entry.total + " 个，不够 " + want
-                    + " 个，没有下单。";
+            shortNote = "「" + entry.displayName + "」只有 " + entry.total + " 个，按 " + entry.total
+                    + " 个下单。";
+            want = (int) Math.min(entry.total, Integer.MAX_VALUE);
         }
         // 1.1.5：取货只从「假人值守的那一间仓库」里取（见 startNext），所以还要按仓库分别核一次 ——
         // 否则 A 仓 10 个（有假人）+ B 仓 100 个（没假人）时下单 50 会被放行，实际只交付 10 个。
@@ -247,15 +281,29 @@ public final class Porter {
                 staffedBest = region;
             }
         }
+        if (staffedMost <= 0) {
+            return "「" + entry.displayName + "」有 " + entry.total + " 个，但没假人值守"
+                    + "（/warehouse bot assign 指派）";
+        }
         if (staffedMost < want) {
-            return "「" + entry.displayName + "」一共有 " + entry.total + " 个，但有假人值守的仓库里最多只有 "
-                    + staffedMost + " 个" + (staffedBest == null ? "" : "（" + staffedBest + "）")
-                    + "，不够 " + want + " 个，没有下单。"
-                    + "请给货多的仓库指派假人：/warehouse bot assign <假人> <仓库>";
+            // I5-opt1 同口径：有假人值守的仓库里不够，就把这间仓库里能给的都给出去 + 提示，
+            // 不再整单拒绝（否则 A 仓 10 个有假人、B 仓 100 个没人时，要 50 一个也拿不到）。
+            shortNote = (shortNote == null ? "" : shortNote + " ")
+                    + "有假人的仓库里最多 " + staffedMost + " 个"
+                    + (staffedBest == null ? "" : "（" + staffedBest + "）") + "，先给这些。";
+            want = (int) Math.min(staffedMost, Integer.MAX_VALUE);
         }
         Order o = new Order(playerName, playerId, entry.itemId, entry.displayName, want);
         o.ench = ench == null ? "" : ench;
+        o.variant = variant == null ? "" : variant;
+        if (shortNote != null) {
+            // I5-opt1：提示写进订单说明，交付时（finish 的 [搬运工] 消息）与历史里都看得到，
+            // 命令回话那边也会立刻再说一遍。
+            o.note = appendNote(o.note, shortNote);
+        }
         PENDING.addLast(o);
+        lastPlaced = want;
+        lastPlacedNote = shortNote;
         WarehouseMod.LOGGER.info("[warehouse-keeper] 取货订单: {} 请求 {} 个 {}{}", playerName, want,
                 entry.displayName, ench == null || ench.isEmpty() ? "" : "（附魔 " + ench + "）");
         return null;
@@ -283,10 +331,21 @@ public final class Porter {
         public final WarehouseIndex.ItemEntry entry;
         /** entry 为 null 时给玩家看的原因；null = 按「索引为空 / 没有这件物品」兜底 */
         public final String problem;
+        /**
+         * 命中的是哪个组件变体（1.2.1）：空串 = 不限组件（这个 id 只有一种，或玩家只给了 id）。
+         *
+         * @see com.ds.warehouse.index.Variants
+         */
+        public final String variantKey;
 
         private Resolved(WarehouseIndex.ItemEntry entry, String problem) {
+            this(entry, problem, "");
+        }
+
+        private Resolved(WarehouseIndex.ItemEntry entry, String problem, String variantKey) {
             this.entry = entry;
             this.problem = problem;
+            this.variantKey = variantKey == null ? "" : variantKey;
         }
     }
 
@@ -295,13 +354,26 @@ public final class Porter {
         return resolveEx(query).entry;
     }
 
-    /** 三段式解析（精确 → 名字精确 → 唯一模糊），详见 {@link Resolved} */
+    /** 四段式解析（变体键 → id 精确 → 变体名精确 → 名字精确 → 唯一模糊），详见 {@link Resolved} */
     public static Resolved resolveEx(String query) {
         if (query == null || query.isBlank()) {
             return new Resolved(null, null);
         }
-        // ① id 精确
-        String id = ItemIds.resolve(query);
+        String q = query.trim();
+        // ⓪ 变体键本身：从取货页/搜索结果里复制来的 minecraft:potion@1a2b3c4d5e
+        if (Variants.isVariantKey(q)) {
+            WarehouseIndex.VariantEntry v = WarehouseMod.INDEX.variant(q);
+            if (v != null) {
+                WarehouseIndex.ItemEntry e = WarehouseMod.INDEX.items.get(v.itemId);
+                if (e != null) {
+                    return new Resolved(e, null, v.key);
+                }
+            }
+            // 键已经不在索引里（东西被取走 / 刚重扫过）⇒ 继续按名字找，找不到就照实说没有
+        }
+        // ① id 精确：输入本身就是一个物品 id 时**不要求指名变体**（面板与老命令发的就是 id，
+        //    语义是「哪种都行」）；中文名才要求指名，见 ② ③ ④
+        String id = ItemIds.resolve(q);
         if (id != null) {
             WarehouseIndex.ItemEntry byId = WarehouseMod.INDEX.items.get(id);
             if (byId != null) {
@@ -312,8 +384,23 @@ public final class Porter {
             // 别的物品顶包（例如用 stone 命中 smooth_stone）。这条也是「没存货也不乱取」的兜底。
             return new Resolved(null, null);
         }
-        String q = query.trim();
-        // ② 名字精确
+        // ② 变体名精确：真实 ItemStack 的名字或组件注解（「抗火药水」「锋利V 附魔书」）
+        List<WarehouseIndex.VariantEntry> namedVariants = new ArrayList<>();
+        for (WarehouseIndex.VariantEntry v : WarehouseMod.INDEX.variants.values()) {
+            if (v.note.isEmpty()) {
+                continue; // 没组件差异的留给 ③，别和 id 级重名判定打架
+            }
+            if (q.equalsIgnoreCase(v.displayName) || q.equalsIgnoreCase(v.label()) || q.equalsIgnoreCase(v.note)) {
+                namedVariants.add(v);
+            }
+        }
+        if (namedVariants.size() == 1) {
+            return fromVariant(namedVariants.get(0));
+        }
+        if (namedVariants.size() > 1) {
+            return new Resolved(null, variantHint(q, namedVariants));
+        }
+        // ③ 名字精确
         List<WarehouseIndex.ItemEntry> named = new ArrayList<>();
         for (WarehouseIndex.ItemEntry e : WarehouseMod.INDEX.items.values()) {
             if (isExactName(e, q)) {
@@ -321,12 +408,12 @@ public final class Porter {
             }
         }
         if (named.size() == 1) {
-            return new Resolved(named.get(0), null);
+            return needVariant(q, named.get(0));
         }
         if (named.size() > 1) {
             return new Resolved(null, ambiguous(q, named));
         }
-        // ③ 子串包含
+        // ④ 子串包含
         String lower = q.toLowerCase(Locale.ROOT);
         List<WarehouseIndex.ItemEntry> hits = new ArrayList<>();
         for (WarehouseIndex.ItemEntry e : WarehouseMod.INDEX.items.values()) {
@@ -340,12 +427,48 @@ public final class Porter {
             }
         }
         if (hits.size() == 1) {
-            return new Resolved(hits.get(0), null);
+            return needVariant(q, hits.get(0));
         }
         if (hits.size() > 1) {
             return new Resolved(null, ambiguous(q, hits));
         }
         return new Resolved(null, null);
+    }
+
+    /** 变体行 ⇒ 解析结果（条目取 id 级那行，另外带上变体键） */
+    private static Resolved fromVariant(WarehouseIndex.VariantEntry v) {
+        WarehouseIndex.ItemEntry e = WarehouseMod.INDEX.items.get(v.itemId);
+        return e == null ? new Resolved(null, null) : new Resolved(e, null, v.key);
+    }
+
+    /**
+     * id 级命中、但这个 id 在仓库里有好几种组件时：不替玩家挑，把候选列出来让玩家指名。
+     *
+     * <p>这就是 I5-B1 的核心行为变化 —— 以前说「药水」会按库存静默挑一种（抗火/夜视/…），
+     * 现在当场列出候选。唯一的例外是输入为精确 id（①，面板与老命令发的就是 id）。
+     */
+    private static Resolved needVariant(String query, WarehouseIndex.ItemEntry e) {
+        List<WarehouseIndex.VariantEntry> vs = WarehouseMod.INDEX.variantsOf(e.itemId);
+        if (vs.size() <= 1) {
+            String key = vs.isEmpty() ? "" : vs.get(0).key;
+            return new Resolved(e, null, Variants.isVariantKey(key) ? key : "");
+        }
+        return new Resolved(null, variantHint(query, vs));
+    }
+
+    /** 「有 N 种不同数据的物品，请指明要哪一种」+ 候选列表（带变体键，可直接复制去下单） */
+    private static String variantHint(String query, List<WarehouseIndex.VariantEntry> variants) {
+        StringBuilder sb = new StringBuilder("仓库里「").append(query).append("」有 ").append(variants.size())
+                .append(" 种不同数据的物品，请指明要哪一种：");
+        int shown = Math.min(MAX_HINT, variants.size());
+        for (int i = 0; i < shown; i++) {
+            WarehouseIndex.VariantEntry v = variants.get(i);
+            sb.append("  ").append(v.label()).append('(').append(v.key).append(')');
+        }
+        if (variants.size() > shown) {
+            sb.append("  …另外还有 ").append(variants.size() - shown).append(" 种");
+        }
+        return sb.toString();
     }
 
     /** 输入是不是这个条目的**完整**名字（中文显示名 / 实时名字 / 去掉命名空间的 id） */
@@ -416,6 +539,22 @@ public final class Porter {
 
         if (active == null) {
             startNext(server);
+        }
+        // W-03 兜底自检：没有订单在跑、却有假人副手还举着东西 —— 说明有哪条路径绕过了 finish()
+        // 的「摘副手」（例如实体被直接 discard()，根本不走 die）。把那份表演副本收掉，免得它之后
+        // 被别的模组弄死时掉成真物品（凭空多一份）。只在没有订单在跑时动手，
+        // 免得和 Tasks 自己的「表演道具」（Tasks.java:872）抢副手。
+        if (++carryCheckTicks >= 40) {
+            carryCheckTicks = 0;
+            if (active == null && !lastCarrier.isEmpty()) {
+                ServerPlayer stale = Body.get(server, lastCarrier);
+                if (stale != null && !stale.getOffhandItem().isEmpty()) {
+                    WarehouseMod.LOGGER.warn("[warehouse-keeper] 兜底：没有订单在跑，但假人 {} 副手还举着 {}，已摘掉",
+                            lastCarrier, stale.getOffhandItem().getHoverName().getString());
+                    Body.hold(server, lastCarrier, null);
+                }
+                lastCarrier = "";
+            }
         }
         // 送货的那个假人去做订单，其他假人各自待命 / 干活
         for (Bots.Entry e : Bots.list()) {
@@ -841,7 +980,7 @@ public final class Porter {
                         : "仓库中没有「" + r.query() + "」这件物品。");
                 continue;
             }
-            String err = enqueue(r.playerName(), null, hit.entry, r.count(), "");
+            String err = enqueue(r.playerName(), null, hit.entry, r.count(), "", hit.variantKey);
             if (err != null) {
                 reject(r, err);
             }
@@ -872,7 +1011,7 @@ public final class Porter {
             WarehouseIndex.ItemEntry entry = WarehouseMod.INDEX.items.get(o.itemId);
             if (entry == null || entry.refs.isEmpty()) {
                 PENDING.pollFirst();
-                finish(server, o, "仓库中当前找不到「" + o.displayName + "」。", true);
+                finish(server, o, "仓库里找不到「" + o.displayName + "」。", true);
                 continue;
             }
             // 挑一个闲着的假人：只能是「值守仓库里真有这单货」的那一位
@@ -881,14 +1020,13 @@ public final class Porter {
                 List<String> where = itemRegions(entry);
                 if (where.isEmpty()) {
                     PENDING.pollFirst();
-                    finish(server, o, "「" + o.displayName + "」不在任何仓库范围内，无法配送。", true);
+                    finish(server, o, "「" + o.displayName + "」不在仓库范围内。", true);
                     continue;
                 }
                 if (!anyBotOn(where)) {
                     PENDING.pollFirst();
-                    finish(server, o, "仓库中「" + o.displayName + "」位于 " + String.join("、", where)
-                            + "，但没有假人值守该仓库。请先使用 /warehouse bot assign <假人> " + where.get(0)
-                            + " 指定后再下单。", true);
+                    finish(server, o, "「" + o.displayName + "」在 " + String.join("、", where)
+                            + "，但那间仓库没假人（/warehouse bot assign 指派）", true);
                     continue;
                 }
                 // 有人值守但都忙着：单子留在队里，等有人空出来
@@ -916,8 +1054,8 @@ public final class Porter {
             }
             if (available < o.count) {
                 PENDING.pollFirst();
-                finish(server, o, "「" + o.displayName + "」在「" + botRegion + "」里只有 " + available
-                        + " 个，不够 " + o.count + " 个，没有取货。", true);
+                finish(server, o, "「" + o.displayName + "」只有 " + available + " 个（要 " + o.count
+                        + " 个），没取货。", true);
                 continue;
             }
             PENDING.pollFirst();
@@ -1065,6 +1203,7 @@ public final class Porter {
         }
         // 让假人真的把货拿在手上（玩家能看见它举着东西）
         Body.hold(server, activeBotName, carried.isEmpty() ? null : carried.get(0).stack());
+        lastCarrier = carried.isEmpty() ? "" : activeBotName;
         Body.swing(server, activeBotName);
         o.state = "送回下单的人";
         o.step = STEP_BACK;
@@ -1098,6 +1237,11 @@ public final class Porter {
         if (!o.ench.isEmpty() && !enchMatches(o.ench, cur)) {
             // 这单指定了附魔（取货页按附魔分行下单）：这一格的附魔组合对不上就跳过，
             // 绝不能拿一本「别的附魔书」糊弄过去。
+            return null;
+        }
+        if (!o.variant.isEmpty() && !o.variant.equals(Variants.keyOf(cur))) {
+            // 1.2.1（I5-B1）：这单指定了组件变体（「抗火药水」「沙漠营地地图」）：这一格的组件
+            // 对不上就跳过 —— 药水/地图/染色装备/烟花这些同 id 不同数据的东西，绝不能拿别种顶包。
             return null;
         }
         int take = Math.min(need, cur.getCount());
@@ -1221,8 +1365,8 @@ public final class Porter {
         Body.hold(server, activeBotName, null);
         Body.swing(server, activeBotName);
 
-        String extra = total > free ? " 背包空间不足，" + (total - free) + " 个已掉落在你脚下。" : "";
-        o.note = appendNote(o.note, "已将 " + delivered + " 个 " + o.displayName + " 送达 " + o.playerName + "。" + extra);
+        String extra = total > free ? " 背包满了，" + (total - free) + " 个掉在脚下。" : "";
+        o.note = appendNote(o.note, "已送达 " + delivered + " 个 " + o.displayName + "。" + extra);
         o.state = "交货中";
         o.step = STEP_SHOW;
         // 在玩家面前多站 1.5 秒再走 —— 不然人一闪就没，玩家根本看不清是谁送的
@@ -1475,6 +1619,7 @@ public final class Porter {
         // 副本要是留在假人手上，之后它被任何模组外原因杀死就会掉成真物品 = 凭空多一份。
         // 和 Tasks.cleanup、Body.remove 同口径。
         Body.hold(server, who, null);
+        lastCarrier = "";
 
         ServerPlayer p = find(server, o);
         if (p != null) {

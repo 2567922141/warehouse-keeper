@@ -45,9 +45,13 @@ public final class RegionStore {
         }
         try (Reader r = Files.newBufferedReader(f, StandardCharsets.UTF_8)) {
             Map<String, Region> loaded = GSON.fromJson(r, MAP_TYPE);
-            if (loaded != null) {
-                REGIONS.putAll(loaded);
+            if (loaded == null) {
+                // W-04：空文件 / 只有空白 / 内容就是 null 时 GSON 不报错、直接给 null。
+                // 要是不当作「读不动」，下面的 save() 会把原文件覆盖成一张空表，
+                // 玩家看到的就是「仓库定义全没了」。这里主动抛，走下面的另存 .bak 分支。
+                throw new IllegalStateException("regions.json 为空或内容为 null");
             }
+            REGIONS.putAll(loaded);
         } catch (Exception e) {
             com.ds.warehouse.WarehouseMod.LOGGER.warn("[warehouse-keeper] 读取 regions.json 失败: {}", e.toString());
             // 读不动的文件不能被下一次 save() 直接覆盖掉：先留一份 .bak（只留第一次的），再照原样继续

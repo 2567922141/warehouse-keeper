@@ -46,7 +46,8 @@ public final class ClientNames {
             if (id != null && BuiltInRegistries.ITEM.containsKey(id)) {
                 Item it = BuiltInRegistries.ITEM.getValue(id);
                 if (it != null) {
-                    String n = new ItemStack(it).getHoverName().getString();
+                    // 基础名而不是 getHoverName()：空栈药水在 26.3 会得到「不可合成的药水」（同 util.Names.item 的注释）
+                    String n = Component.translatable(it.getDescriptionId()).getString();
                     if (n != null && !n.isBlank() && !isRawKey(n)) {
                         name = n;
                     }

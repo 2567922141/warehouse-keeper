@@ -109,19 +109,38 @@ public final class IndexStore {
         return t;
     });
 
+    /** 上一次排队保存时的「哪个世界的第几个修订」，用来跳过没有变化的空转保存（报告 W-13） */
+    private static String lastSavedWhere = "";
+    private static long lastSavedRevision = -1L;
+
     /**
      * 排队落盘：序列化与写文件都交给后台线程，不阻塞服务端 tick（审查发现 T5）。
      *
-     * @return null 表示已受理，否则是不能保存的原因
+     * <p>W-13：索引没有变化时直接返回，连 {@link #snapshot}（tick 线程上抄整份索引）都不做。
+     * 存档路径一起记，换世界后绝不会因为修订号碰巧相同而漏存。
+     *
+     * @return null 表示已受理（或无需保存），否则是不能保存的原因
      */
     public static String save(WarehouseIndex index, MinecraftServer server) {
         if (!AppConfig.get().saveIndexToDisk) {
             return "配置中已关闭「保存索引到磁盘」（可用 /warehouse settings 修改）";
         }
-        Dto dto = snapshot(index, server);
+        try {
+            Variants.useRegistries(server.registryAccess()); // 附魔等组件的编码同样需要注册表
+        } catch (Throwable t) {
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] 注册表注入失败（保存）: {}", t.toString());
+        }
         Path f = fileFor(server);
+        String where = f.toString();
+        long rev = index.revision();
+        if (where.equals(lastSavedWhere) && rev == lastSavedRevision) {
+            return null; // 一个字都没变，没必要再抄一遍、再写一遍盘
+        }
+        Dto dto = snapshot(index, server);
         int kinds = index.items.size();
         long total = index.totalItems;
+        lastSavedWhere = where;
+        lastSavedRevision = rev;
         SAVE_IO.execute(() -> {
             String err = write(dto, f, kinds, total);
             if (err != null) {
@@ -200,6 +219,10 @@ public final class IndexStore {
                 // 与网页 / 面板 / 聚合表完全同源的方法，不另造一套拼串逻辑。
                 it.ench = Scanner.enchantText(ss.stack());
                 it.customName = Scanner.customNameText(ss.stack());
+                // 非默认组件（可选字段，**没有**改 format 号）：1.2.1 起随每格落盘，
+                // 读回来能还原药水效力 / 地图编号 / 染色值，也让组件变体的身份在重启后不丢
+                // （只存变体键的话，重启后重建的栈没有组件，哈希对不上，变体会合并回一个 id）。
+                it.comp = Variants.snbtOf(ss.stack());
                 cd.items.add(it);
             }
             dto.containers.add(cd);
@@ -236,6 +259,14 @@ public final class IndexStore {
     public static String load(WarehouseIndex index, MinecraftServer server) {
         index.restoredFromDisk = false;
         index.restoredSavedAt = 0;
+
+        // 组件（附魔 / 药水 / 烟花…）的解析必须有注册表：附魔书用裸 NbtOps 会直接解析失败
+        // （Can't access registry minecraft:enchantment），见 Variants.useRegistries。
+        try {
+            Variants.useRegistries(server.registryAccess());
+        } catch (Throwable t) {
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] 注册表注入失败，变体组件可能解析不出来: {}", t.toString());
+        }
 
         if (!AppConfig.get().loadIndexFromDisk) {
             lastLoadNote = "配置中已关闭「开档读取磁盘索引」";
@@ -347,6 +378,9 @@ public final class IndexStore {
                         continue;
                     }
                     applySlotMeta(st, it, enchantLookup);
+                    // 组件灌回去（1.2.1 起的可选字段）：必须在 rec.add() 之前，
+                    // 这样 accept() 里的变体聚合看到的就是带组件的真栈
+                    Variants.applyComponents(st, it.comp);
                     rec.add(it.slot, st);
                 }
             }
@@ -364,6 +398,9 @@ public final class IndexStore {
         index.lastScanRegion = dto.lastScanRegion == null ? "-" : dto.lastScanRegion;
         index.restoredFromDisk = true;
         index.restoredSavedAt = dto.savedAt;
+        // W-13：刚读回来的这份就是磁盘上的现状，记下它，别在第一次保存时白白再抄一遍
+        lastSavedWhere = f.toString();
+        lastSavedRevision = index.revision();
 
         // 分类热启动：落过盘、且规则版本一致，才灌记忆化（旧格式 / 缺字段 / 规则改过 → 留空，用到时现算）
         boolean seeded = dto.categoriesRules == CategoryRules.VERSION;
@@ -548,5 +585,13 @@ public final class IndexStore {
         String ench = "";
         /** format 4 起：这一格物品的自定义名原文（铁砧 / 命名牌改过才有）。老索引没有 = 空串 */
         String customName = "";
+        /**
+         * 1.2.1 起：这一格的**非默认组件**（SNBT，见 {@link Variants#snbtOf}）。老索引没有 = 空串。
+         *
+         * <p>故意<b>没有</b>把 {@code format} 从 4 提到 5：这是个可选字段，老文件照样能读、
+         * 新文件老版本也能读（Gson 忽略不认识的字段）。提格式号会让每份老存档都被判「旧格式」
+         * 而强制重扫一遍，收益不值这个代价。
+         */
+        String comp = "";
     }
 }

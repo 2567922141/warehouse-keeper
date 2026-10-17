@@ -1,6 +1,7 @@
 package com.ds.warehouse.client;
 
 import com.ds.warehouse.WarehouseMod;
+import com.ds.warehouse.api.AddonSettings;
 import com.ds.warehouse.net.ViewQueryPayload;
 import com.ds.warehouse.util.Categories;
 import com.google.gson.JsonObject;
@@ -8,6 +9,7 @@ import com.google.gson.JsonObject;
 // 改用下面这些具名常量（原版 AbstractWidget.isValidClickButton / InputWithModifiers.isEscape
 // 用的就是同一套编号）。老写法在 26.3 上不会报错，只会让手写的命中判定静默失效。
 import com.mojang.blaze3d.platform.InputConstants;
+
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
@@ -68,6 +70,8 @@ public class WarehouseScreen extends Screen {
     private int MARGIN = 8;
     /** 面板内部的左右留白（紧凑 8） */
     private int PAD = 12;
+    /** 标题带/关闭按钮离面板上边框的空隙：贴太紧会跟 UI 顶线重合（用户 m44165 反馈） */
+    private int HDR_TOP = 5;
     /** 元件之间的标准间距（紧凑 4） */
     private int GAP = 6;
     /** 面板尺寸上限：屏幕再大也不无限拉伸 */
@@ -111,6 +115,14 @@ public class WarehouseScreen extends Screen {
     /** 「设置」页：每个设置项右边那个按钮的宽度、以及说明与按钮之间留的缝 */
     private static final int SET_BTN_W = 150;
     private static final int SET_ROW_GAP = 2;
+    /**
+     * 「设置」页最多放几行（放不下时 {@code takeTop} 会自然截断；附属模组想加行只要在 rows() 里多返回一条）。
+     *
+     * <p>上限只是防呆：真正决定画几行的是 {@link #layoutSettings()} —— 行多时把行高从 {@code ROW_H}
+     * 压到 {@code ROW_H_MIN}，尽量一屏放完（语音附属页现在有 14 行：6 项开关 + 3 项 AI + 下载状态
+     * + 4 个模型的下载/删除按钮），窗口实在太小才截断。
+     */
+    private static final int MAX_SET_ROWS = 20;
 
     /**
      * 把上面那组尺寸按客户端偏好（「设置」页 ·「界面密度」）重算一遍。
@@ -122,6 +134,7 @@ public class WarehouseScreen extends Screen {
         boolean tight = ClientPrefs.compactDensity();
         MARGIN = tight ? 6 : 8;
         PAD = tight ? 8 : 12;
+        HDR_TOP = tight ? 4 : 5;
         GAP = tight ? 4 : 6;
         HEAD_H = tight ? 18 : 20;
         TAB_H = tight ? 16 : 18;
@@ -262,6 +275,40 @@ public class WarehouseScreen extends Screen {
     private final int[] subOf = new int[5];
     /** 「设置」页：一列设置项（每行左边说明、右边按钮），空的表示这页没布局 */
     private final List<R> setRows = new java.util.ArrayList<>();
+    /** 附属模组页上一次的行文案指纹（见 {@link #addonSig(AddonSettings)}），和 tick 里的自动比对配对 */
+    private String addonSig = "";
+    /** 上一次自动比对是第几 tick（隔几个 tick 才比一次，别每 tick 都问附属模组要一遍行） */
+    private int addonTick;
+    /** 附属模组的 rows() 出错后只打一条日志，恢复了再打（见 {@link #addonRows(AddonSettings)}） */
+    private boolean addonRowsBroken;
+
+    /**
+     * 附属模组 {@link AddonSettings.Kind#TEXT} 行的输入框，**跨 rebuild 复用**。
+     *
+     * <p>为什么非要自己收着：面板每 0.4 秒会因为「行文案指纹变了」重建一次控件（{@link #addonSig}），
+     * {@code rebuildWidgets()} 会把所有控件清掉重加 —— 每次都 new 一个输入框的话，玩家正在敲的 Key
+     * 会在半秒后被抹掉。所以实例按「附属模组 id + 行标题」缓存，重建时把同一个实例重新 add 进去，
+     * 光标、内容都还在（焦点由 {@link #rebuildWidgets()} 恢复）。
+     *
+     * <p>键是「附属模组 id \u0001 行标题」；{@code addonTextDrafts} 存**真值**（敏感行显示的是星号版），
+     * 提交完立刻从两个表里删掉，不让 Key 在内存里多留。
+     */
+    private final Map<String, EditBox> addonTextBoxes = new LinkedHashMap<>();
+    private final Map<String, AddonSettings.Row> addonTextRows = new LinkedHashMap<>();
+    private final Map<String, String> addonTextDrafts = new LinkedHashMap<>();
+    /** 这一趟 rebuild 里真正 add 进去的 TEXT 行（用来决定重建后要不要把焦点还给它） */
+    private final Set<String> addonTextPresent = new LinkedHashSet<>();
+    /** 当前附属模组页的行标题合集（页内换子页时它变，用来发现「玩家离开这一页了」） */
+    private String addonPageSig = "";
+
+    /**
+     * 附属模组设置页里的**下拉菜单**（{@link AddonSettings.Row#options()} 非空的行），同样跨 rebuild 复用。
+     *
+     * <p>跟输入框一样的道理：面板每 0.4 秒可能重建一次控件，展开态与滚动位置得跟着实例走，
+     * 否则玩家刚点开的下拉半秒后就自己合上了。键也是「附属模组 id \u0001 行标题」。
+     */
+    private final Map<String, Dropdown> addonChoiceDds = new LinkedHashMap<>();
+
     /** 本次打开面板是否已经按「记住上次打开的页面」恢复过；只恢复一次，之后归玩家手动切换管 */
     private boolean pageRestored;
 
@@ -556,7 +603,9 @@ public class WarehouseScreen extends Screen {
 
         // ② 从上往下：标题带 / 页签带 / 小标题带；从下往上：「最近结果」。
         //    两者之间的就是内容区 —— 它的大小完全由这两头推出来。
-        Flow v = new Flow(panel.inset(PAD, 0));
+        //    顶部再留 HDR_TOP：标题「仓库管理」和右上角关闭按钮整体下移，不再压着面板上边框。
+        Flow v = new Flow(new R(panel.x() + PAD, panel.y() + HDR_TOP,
+                Math.max(0, panel.w() - PAD * 2), Math.max(0, panel.h() - HDR_TOP)));
         header = v.takeTop(HEAD_H, GAP);
         tabs = v.takeTop(TAB_H, GAP);
         // 二级页签带：只有「仓库」「搬运工」两页有子页；挤不下时先变矮、再整条放弃（内容优先）
@@ -701,7 +750,7 @@ public class WarehouseScreen extends Screen {
             need += Math.max(1, wrap(part, width).size());
         }
         int lines = Math.max(1, Math.min(3, need));
-        int fixed = HEAD_H + TAB_H + CAP_H + GAP * 5 + MARGIN * 2;
+        int fixed = HEAD_H + TAB_H + CAP_H + GAP * 5 + MARGIN * 2 + HDR_TOP;
         // 面板太矮时只留一行，把高度让给内容区
         if (ph - fixed - (CAP_H + lines * LINE_H + 2) < MIN_CONTENT_H) {
             lines = 1;
@@ -1676,7 +1725,9 @@ public class WarehouseScreen extends Screen {
      * 服务端的输出直接进聊天栏（{@link #run} 已经挂着聊天栏回执的提示通道）。
      */
     private void searchEnchants() {
-        String kw = boxEnchText == null ? "" : boxEnchText.replace('\n', ' ').replace('\r', ' ').trim();
+        // W-08：输入框里的原文也要过一遍 clean()（剥控制字符 + 两端空白），
+        // 否则粘贴进来的换行/制表符会把指令拆坏。
+        String kw = clean(boxEnchText);
         if (kw.isEmpty()) {
             status = "请先在「搜索附魔/自定义名」输入框里填一个附魔名或物品自定义名。";
             return;
@@ -2433,7 +2484,8 @@ public class WarehouseScreen extends Screen {
      * 二级页签的名字。
      *
      * <p>「仓库」页管理员 6 个（概览 / 新建 / 扩建/缩小 / 物品 / 箱子 / 维护），普通玩家只给 3 个（概览 / 物品 / 箱子）；
-     * 「搬运工」页 2 个（名册值守 / 整理）；「权限」页 2 个（权限 / 审计）；「取货」「设置」没有子页。
+     * 「搬运工」页 2 个（名册值守 / 整理）；「权限」页 2 个（权限 / 审计）；「取货」没有子页；
+     * 「设置」页装了附属模组时是「常规」+ 每个附属模组一个（见 {@link #settingsSubNames()}），没装就没有子页。
      */
     private String[] subNames() {
         return switch (tabName()) {
@@ -2442,8 +2494,37 @@ public class WarehouseScreen extends Screen {
                     : new String[]{"概览", "物品", "箱子"};
             case "搬运工" -> admin ? new String[]{"名册值守", "整理"} : new String[0];
             case "权限" -> admin ? new String[]{"权限", "审计"} : new String[0];
+            case "设置" -> settingsSubNames();
             default -> new String[0];
         };
+    }
+
+    /**
+     * 「设置」页的子页：**装了附属模组**时是「常规」（现在那 4 行）+ 每个附属模组一个（按 {@link AddonSettings#title()}）；
+     * 一个都没装时返回空表 —— 此时「设置」页与 1.2.0 完全一致，不多一行、不报错。
+     */
+    private String[] settingsSubNames() {
+        List<AddonSettings> addons = AddonSettingsRegistry.all();
+        if (addons.isEmpty()) {
+            return new String[0];
+        }
+        String[] names = new String[addons.size() + 1];
+        names[0] = "常规";
+        for (int i = 0; i < addons.size(); i++) {
+            AddonSettings a = addons.get(i);
+            names[i + 1] = a == null || a.title() == null || a.title().isBlank() ? ("附属 " + (i + 1)) : a.title();
+        }
+        return names;
+    }
+
+    /** 当前「设置」子页对应的附属模组；停在「常规」或这一页没有子页时是 null。 */
+    private AddonSettings settingAddon() {
+        if (!"设置".equals(tabName()) || subNames().length == 0 || sub <= 0) {
+            return null;
+        }
+        List<AddonSettings> addons = AddonSettingsRegistry.all();
+        int i = sub - 1;
+        return i < addons.size() ? addons.get(i) : null;
     }
 
     /** 当前子页的名字；本页没有子页时是空串 */
@@ -2480,6 +2561,9 @@ public class WarehouseScreen extends Screen {
         }
         sub = i;
         subOf[Math.max(0, Math.min(tab, subOf.length - 1))] = sub;
+        // 离开这一页前，把附属模组输入框里没提交的东西交回去（否则玩家以为存上了，其实丢了）
+        commitAddonText("");
+        closeAddonChoices();
         boxScroll = 0;
         rebuildWidgets();
     }
@@ -2490,6 +2574,9 @@ public class WarehouseScreen extends Screen {
             return;
         }
         subOf[Math.max(0, Math.min(tab, subOf.length - 1))] = sub;
+        // 同 openSub：换页前先把附属模组输入框里的东西交回去
+        commitAddonText("");
+        closeAddonChoices();
         tab = t;
         sub = subOf[Math.max(0, Math.min(t, subOf.length - 1))];
         if (sub < 0 || sub >= subNames().length) {
@@ -2517,13 +2604,79 @@ public class WarehouseScreen extends Screen {
             return;
         }
         Flow f = new Flow(content);
-        for (int i = 0; i < 6; i++) {
-            R r = f.takeTop(ROW_H, SET_ROW_GAP);
-            if (r == null) {
-                break;
+        int n = settingsRowCount();
+        if (n > 0) {
+            // 行多的时候按可用高度均分（最低 ROW_H_MIN），把「底下那句说明」的高度先留出来：
+            // 14 行的附属页也要一屏看得下，而不是最后两行被悄悄吃掉。
+            int avail = Math.max(ROW_H_MIN, f.left() - LINE_H - GAP);
+            int pitch = Math.max(ROW_H_MIN, (avail - (n - 1) * SET_ROW_GAP) / n);
+            int h = Math.min(ROW_H, pitch);
+            for (int i = 0; i < n; i++) {
+                R r = f.takeTop(h, SET_ROW_GAP);
+                if (r == null) {
+                    break;
+                }
+                setRows.add(r);
             }
-            setRows.add(r);
         }
+    }
+
+    /**
+     * 这一页要几行。
+     *
+     * <p>附属模组页按它自己 {@link AddonSettings#rows()} 的条数算 —— 所以「模型下载」这类新行只要附属模组
+     * 在 {@code rows()} 里多返回一条就画得出来，主体面板不用改（这是这套接口存在的理由）；
+     * 「常规」页 = 4 项本机偏好 + 每个附属模组一行入口 + 每个老附属模组一行提示。
+     * 上限 {@link #MAX_SET_ROWS}；真的放不下时由 {@code takeTop} 自然截断（小窗口就少放几行，不叠字）。
+     */
+    private int settingsRowCount() {
+        AddonSettings addon = settingAddon();
+        if (addon != null) {
+            return Math.min(MAX_SET_ROWS, addonRows(addon).size());
+        }
+        return Math.min(MAX_SET_ROWS, 4 + AddonSettingsRegistry.all().size() + AddonSettingsRegistry.legacyIds().size());
+    }
+
+    /**
+     * 问附属模组要行。
+     *
+     * <p>接口契约里写着「{@code rows()} 抛异常只是这个菜单不出现，面板照常」—— 这里就是那条保证的落点。
+     * 面板每秒会问几次（比对行文案），所以出错日志只在恢复前打一条，不刷屏。
+     */
+    private List<AddonSettings.Row> addonRows(AddonSettings addon) {
+        if (addon == null) {
+            return List.of();
+        }
+        try {
+            List<AddonSettings.Row> rows = addon.rows();
+            addonRowsBroken = false;
+            return rows == null ? List.of() : rows;
+        } catch (Throwable t) {
+            if (!addonRowsBroken) {
+                addonRowsBroken = true;
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 附属模组 {} 的 rows() 出错，这一页先当空页处理：{}", addon.id(), t);
+            }
+            return List.of();
+        }
+    }
+
+    /**
+     * 附属模组页的行文案指纹：用来发现「没人点、但它自己变了」的情况（模型下载进度、装好之后按钮从
+     * 「取消」变「删除」）。{@link AddonSettings.Kind#INFO} 不进指纹 —— 它的值本来就每帧现画，
+     * 把进度百分比算进去会把重建打成每秒几十次。
+     */
+    private String addonSig(AddonSettings addon) {
+        StringBuilder sb = new StringBuilder(96);
+        for (AddonSettings.Row row : addonRows(addon)) {
+            if (row.kind() == AddonSettings.Kind.INFO || row.kind() == AddonSettings.Kind.TEXT) {
+                // INFO：值本来就每帧现画；TEXT：value 只是输入框的占位提示，进去不算「页面变了」，
+                // 否则玩家刚存完 Key、提示从「未填」变「已填」，这一页又会重建一次（白闪一下）
+                continue;
+            }
+            sb.append(row.label()).append('\u0001').append(row.value()).append('\u0001')
+                    .append(row.kind()).append('\u0001').append(row.enabled()).append('\u0002');
+        }
+        return sb.toString();
     }
 
     /** 一行设置项里右边那个按钮的矩形（宽度固定；说明文字拿剩下的） */
@@ -2542,7 +2695,35 @@ public class WarehouseScreen extends Screen {
         };
     }
 
+    /** 当前设置子页每一行左边的说明文字（第 i 行配 {@link #setRows} 的第 i 个矩形） */
+    private List<String> settingsNotes() {
+        AddonSettings addon = settingAddon();
+        List<String> out = new ArrayList<>();
+        if (addon == null) {
+            out.addAll(List.of(setRowNotes()));
+            List<AddonSettings> addons = AddonSettingsRegistry.all();
+            for (AddonSettings a : addons) {
+                out.add(a.title() + " —— " + a.summary() + "（点右边「打开」）");
+            }
+            for (String id : AddonSettingsRegistry.legacyIds()) {
+                out.add(id + " —— 版本较旧，还没把设置项交给面板；请用它自己的设置界面（例如 /warehousevoice）");
+            }
+            return out;
+        }
+        for (AddonSettings.Row row : addonRows(addon)) {
+            String note = row.note() == null ? "" : row.note().trim();
+            out.add(note.isEmpty() ? row.label() : row.label() + " —— " + note);
+        }
+        return out;
+    }
+
     private void initSettings() {
+        AddonSettings addon = settingAddon();
+        if (addon != null) {
+            initAddonSettings(addon);
+            return;
+        }
+        List<AddonSettings> addons = AddonSettingsRegistry.all();
         for (int i = 0; i < setRows.size(); i++) {
             R box = setBtnRect(setRows.get(i));
             if (box.empty()) {
@@ -2553,31 +2734,341 @@ public class WarehouseScreen extends Screen {
                 case 1 -> btn(rememberLabel(), box, b -> toggleRememberLastPage(b));
                 case 2 -> btn(densityLabel(), box, b -> toggleDensity(b));
                 case 3 -> btn(themeLabel(), box, b -> cycleTheme(b));
-                default -> { }
+                default -> {
+                    // 4 行之后是各附属模组的入口行：点「打开」进它的二级页
+                    int k = i - 4;
+                    if (k >= 0 && k < addons.size()) {
+                        int target = k + 1;
+                        btn("打开", box, b -> openSub(target));
+                    }
+                }
             }
         }
     }
 
-    private void drawSettings(GuiGraphicsExtractor g) {
-        String[] notes = setRowNotes();
-        for (int i = 0; i < setRows.size() && i < notes.length; i++) {
+    /**
+     * 重建控件时把「附属模组 TEXT 行的焦点」还回去。
+     *
+     * <p>原版 {@code rebuildWidgets()} 会先清掉所有控件再 {@code init()}，焦点被置空；而面板每 0.4 秒
+     * 就可能因为行文案自己变了（下载进度、「取消」变「删除」）重建一次 —— 不还焦点的话，玩家敲到一半的
+     * API Key 就断了。输入框实例是复用的（见 {@link #addonTextBoxes}），把焦点指回去内容与光标都还在。
+     */
+    @Override
+    protected void rebuildWidgets() {
+        String keep = null;
+        var focused = getFocused();
+        if (focused != null) {
+            for (Map.Entry<String, EditBox> e : addonTextBoxes.entrySet()) {
+                if (e.getValue() == focused) {
+                    keep = e.getKey();
+                    break;
+                }
+            }
+        }
+        addonTextPresent.clear();
+        super.rebuildWidgets();
+        if (keep != null && addonTextPresent.contains(keep)) {
+            setFocused(addonTextBoxes.get(keep));
+        }
+    }
+
+    /**
+     * 附属模组自己的设置页：一行一个按钮，点击回调它本身，然后重画整页。
+     *
+     * <p>点击后**重新问一遍** {@code addon.rows()} 取新值写状态行（不缓存行对象的值）——
+     * 这是接口契约里那条「不许各记一份」在主体侧的对应保证。
+     */
+    private void initAddonSettings(AddonSettings addon) {
+        List<AddonSettings.Row> rows = addonRows(addon);
+        // 页内换子页（附属模组自己翻页，行标题整体换掉）算「离开上一页」：把没提交的输入先交回去
+        String pageSig = addon.id() + "#" + rows.stream().map(AddonSettings.Row::label).reduce("", (a, b) -> a + "\u0001" + b);
+        if (!pageSig.equals(addonPageSig)) {
+            commitAddonText("");
+            addonTextBoxes.clear();
+            addonTextRows.clear();
+            addonTextDrafts.clear();
+            // 换页了：把上一页还开着的下拉收掉（实例不能再复用，条目整组都换了）
+            for (Dropdown dd : addonChoiceDds.values()) {
+                dd.open = false;
+            }
+            addonChoiceDds.clear();
+            addonPageSig = pageSig;
+        }
+        for (int i = 0; i < setRows.size() && i < rows.size(); i++) {
+            R box = setBtnRect(setRows.get(i));
+            if (box.empty()) {
+                continue;
+            }
+            AddonSettings.Row row = rows.get(i);
+            int idx = i;
+            if (row.header()) {
+                continue;   // 分组标题行：只画字，不建任何控件
+            }
+            switch (row.kind()) {
+                case CYCLE, TOGGLE, ACTION -> {
+                    if (!row.options().isEmpty()) {
+                        addonChoiceBox(addon, row, box);
+                    } else {
+                        Button b = btn(row.value(), box, x -> {
+                            try {
+                                row.act();
+                            } catch (Throwable t) {
+                                WarehouseMod.LOGGER.warn("[warehouse-keeper] 附属模组设置项回调出错（{}）：{}", row.label(), t);
+                            }
+                            // 回读「点完之后」的值当状态行。注意按**标题**找而不是按下标：附属模组翻页时
+                            // 整页的行都换掉了，同一个下标在新页里是另一行（点「模型管理」进去会读到「返回」）。
+                            List<AddonSettings.Row> now = addonRows(addon);
+                            String value = row.value();
+                            for (AddonSettings.Row r : now) {
+                                if (r.label().equals(row.label())) {
+                                    value = r.value();
+                                    break;
+                                }
+                            }
+                            status = addon.title() + "：" + row.label() + " → " + value;
+                            rebuildWidgets();
+                        });
+                        b.active = row.enabled();
+                    }
+                }
+                case TEXT -> addonTextBox(addon, row, box);
+                case INFO -> { }
+            }
+        }
+        // 记下这一版指纹，免得刚建完就被 tick 里的自动比对再重建一次
+        addonSig = addonSig(addon);
+    }
+
+    /**
+     * 一行 {@link AddonSettings.Kind#TEXT}：右边那一格放一个真输入框。
+     *
+     * <p>输入框是空的（占位提示画 {@link AddonSettings.Row#value()}，例如「未填」/「已填 sk-1****」），
+     * 敲进去的东西按「回车」或「离开这一页」提交给 {@link AddonSettings.Row#text(String)}，提交完清空：
+     * 屏幕上不留原文，回到「只显示前 4 位」的那行提示。敏感行（{@link AddonSettings.Row#secret()}）
+     * 一边敲一边画星号。
+     */
+    private void addonTextBox(AddonSettings addon, AddonSettings.Row row, R box) {
+        String key = addon.id() + "\u0001" + row.label();
+        EditBox field = addonTextBoxes.get(key);
+        if (field == null) {
+            field = new EditBox(this.font, box.x(), box.y() + 1, box.w(), Math.max(8, box.h() - 2),
+                    Component.literal(row.label()));
+            field.setMaxLength(200);
+            final String k = key;
+            field.setResponder(v -> addonTextTyped(k, row, v));
+            addonTextBoxes.put(key, field);
+            addonTextDrafts.put(key, "");
+        }
+        field.setX(box.x());
+        field.setY(box.y() + 1);
+        field.setWidth(box.w());
+        field.setHeight(Math.max(8, box.h() - 2));
+        addonTextRows.put(key, row);
+        addonTextPresent.add(key);
+        // 提示 = 附属模组给的状态（未填 / 已填 sk-1****）；盒子空着的时候才画得出来
+        rememberHint(field, row.value().isEmpty() ? "在这里输入后回车" : row.value());
+        addRenderableWidget(field);
+    }
+
+    /**
+     * 一行 {@link AddonSettings.Row#options()} 非空的选择项：右边那一格放一个**真下拉菜单**。
+     *
+     * <p>下拉实例跨 rebuild 复用（键 = 附属模组 id + 行标题），否则面板每 0.4 秒的自动重建会把玩家
+     * 刚展开的菜单合上；条目每次重建都从 {@code row.options()} 重取（附属模组自己可能改了候选）。
+     * 选中回调走 {@link AddonSettings.Row#pick(int)}，面板不插手「选了什么」。
+     */
+    private void addonChoiceBox(AddonSettings addon, AddonSettings.Row row, R box) {
+        String key = addon.id() + "\u0001" + row.label();
+        Dropdown cached = addonChoiceDds.get(key);
+        if (cached == null) {
+            cached = new Dropdown();
+            cached.prefix = "";   // 设置页不需要「仓库：」这种前缀，按钮上直接写选项名
+            addonChoiceDds.put(key, cached);
+        }
+        final Dropdown dd = cached;
+        dd.entries = List.copyOf(row.options());
+        dd.labels = null;
+        dd.choice = dd.entries.isEmpty() ? 0 : Math.max(0, Math.min(row.optionIndex(), dd.entries.size() - 1));
+        dd.onSelect = index -> {
+            try {
+                row.pick(index);
+            } catch (Throwable t) {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 附属模组下拉回调出错（{}）：{}", row.label(), t);
+            }
+            status = addon.title() + "：" + row.label() + " → " + dd.entryLabel(index);
+            rebuildWidgets();
+        };
+        dd.btnRect = box;
+        dd.button = btn(dd.label(), box, b -> {
+            // 一次只开一个：整页都是选项，同时张着几个菜单会把下面的行全盖住
+            for (Dropdown other : addonChoiceDds.values()) {
+                if (other != dd) {
+                    other.open = false;
+                }
+            }
+            dd.toggle();
+        });
+        dd.button.active = row.enabled();
+        dd.layout();
+    }
+
+    /** 附属模组页里有没有展开着的下拉（Esc 先收它，别直接退出界面）。 */
+    private boolean closeAddonChoices() {
+        boolean any = false;
+        for (Dropdown dd : addonChoiceDds.values()) {
+            if (dd.open) {
+                dd.close();
+                any = true;
+            }
+        }
+        return any;
+    }
+
+    /**
+     * 输入框内容变了：把玩家真敲的东西记进草稿。
+     *
+     * <p>敏感行显示的是星号版，所以不能直接拿盒子里的字当值（那是星号）。这里按「星号串的前缀长度」
+     * 反推：前面没动、尾部多出来/少掉的那几个字符就是玩家真的敲的（和 {@code VoiceKeyScreen} 同一套算法），
+     * 反推完立刻把盒子改回星号版 —— 否则下一键会把上一次的真字符再算一遍。
+     */
+    private void addonTextTyped(String key, AddonSettings.Row row, String shown) {
+        String draft = addonTextDrafts.getOrDefault(key, "");
+        if (!row.secret()) {
+            addonTextDrafts.put(key, shown);
+            return;
+        }
+        String masked = maskText(draft);
+        if (shown.equals(masked)) {
+            return;
+        }
+        if (shown.startsWith(masked)) {
+            draft = draft + shown.substring(masked.length());
+        } else if (masked.startsWith(shown)) {
+            draft = draft.substring(0, Math.min(draft.length(), shown.length()));
+        } else {
+            // 整段被替换（全选粘贴/剪切）：把显示串里不是星号的部分当新内容，比丢掉整串强
+            StringBuilder fresh = new StringBuilder();
+            for (int i = 0; i < shown.length(); i++) {
+                if (shown.charAt(i) != '*') {
+                    fresh.append(shown.charAt(i));
+                }
+            }
+            draft = fresh.toString();
+        }
+        addonTextDrafts.put(key, draft);
+        EditBox field = addonTextBoxes.get(key);
+        String want = maskText(draft);
+        if (field != null && !shown.equals(want)) {
+            // setValue 会再回调一次 responder，但那时 shown == 星号版，上面第一行就返回了，不会递归
+            field.setValue(want);
+        }
+    }
+
+    /** 星号版：前 4 位照抄，后面每个字符一个星号（空就是空）。 */
+    private static String maskText(String value) {
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        if (value.length() <= 4) {
+            return "*".repeat(value.length());
+        }
+        return value.substring(0, 4) + "*".repeat(value.length() - 4);
+    }
+
+    /**
+     * 把草稿提交给附属模组（回车、离开这一页、关面板时都会走到）。
+     *
+     * <p>只有「非空且和附属模组自己报的值不同」才提交；提交后清空盒子与草稿 —— 面板上只留打码提示，
+     * 原文不在内存里多留一秒。{@code what} 是状态行里那句「谁的哪一项」。
+     */
+    private void commitAddonText(String what) {
+        if (addonTextBoxes.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, EditBox> e : addonTextBoxes.entrySet()) {
+            AddonSettings.Row row = addonTextRows.get(e.getKey());
+            String draft = addonTextDrafts.getOrDefault(e.getKey(), "").trim();
+            if (row == null || draft.isEmpty()) {
+                continue;
+            }
+            try {
+                row.text(draft);
+                status = "已保存" + (what.isEmpty() ? "" : "：" + what + " → ") + row.label();
+            } catch (Throwable t) {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 附属模组文本项提交出错（{}）：{}", row.label(), t);
+            }
+            addonTextDrafts.put(e.getKey(), "");
+            e.getValue().setValue("");
+        }
+    }
+
+    private void drawSettings(GuiGraphicsExtractor g, int mouseX, int mouseY) {
+        AddonSettings addon = settingAddon();
+        List<AddonSettings.Row> addonRowList = addon == null ? List.of() : addonRows(addon);
+        List<String> notes = settingsNotes();
+        for (int i = 0; i < setRows.size() && i < notes.size(); i++) {
             R row = setRows.get(i);
+            AddonSettings.Row setting = i < addonRowList.size() ? addonRowList.get(i) : null;
+            if (setting != null && setting.header()) {
+                // 分组小标题：一条浅底 + 标题字 + 底下一道分隔线，把「识别模型 / 模型下载 / AI 功能」
+                // 分开。以前十几行说明连成一片灰墙，认不出哪几行管同一件事。
+                fillIn(g, new R(row.x() - 2, row.y(), row.w() + 4, row.h()), Palette.rowBgDeep());
+                R title = new R(row.x(), row.y() + Math.max(0, (row.h() - LINE_H) / 2), row.w(), LINE_H);
+                if (!title.empty()) {
+                    textIn(g, title, notes.get(i), Palette.accentTextBright());
+                }
+                g.fill(row.x() - 2, row.bottom() - 1, row.right() + 2, row.bottom(), Palette.panelBorder());
+                continue;
+            }
             int labW = Math.max(0, setBtnRect(row).x() - GAP - row.x());
             R box = new R(row.x(), row.y() + Math.max(0, (row.h() - LINE_H) / 2), labW, LINE_H);
             if (!box.empty()) {
-                textIn(g, box, notes[i], Palette.textBody2());
+                // 一行读成两段：标题正文色、说明灰一档 —— 一串「标题 —— 长说明」画成同色的话，
+                // 十几行连起来就是一面灰墙（面板里的设置项就是这么长起来的）。
+                String line = notes.get(i);
+                int cut = line.indexOf(" —— ");
+                if (cut > 0) {
+                    String label = line.substring(0, cut);
+                    String note = line.substring(cut + 4);
+                    textIn(g, box, label, Palette.textBody());
+                    int used = this.font.width(fitChecked(label, labW, box));
+                    int x = box.x() + used + GAP;
+                    R rest = new R(x, box.y(), Math.max(0, box.right() - x), LINE_H);
+                    if (!rest.empty()) {
+                        textIn(g, rest, note, Palette.textFaint());
+                    }
+                } else {
+                    textIn(g, box, line, Palette.textBody());
+                }
             }
         }
-        // 底下那句「只影响本机」的说明：有位置就画、没位置就不画（内容优先）
         if (content == null || content.empty()) {
             return;
         }
+        // INFO 行没有按钮，值直接画在按钮的位置上
+        if (addon != null) {
+            List<AddonSettings.Row> rows = addonRowList;
+            for (int i = 0; i < setRows.size() && i < rows.size(); i++) {
+                AddonSettings.Row row = rows.get(i);
+                if (row.header() || row.kind() != AddonSettings.Kind.INFO) {
+                    continue;
+                }
+                R box = setBtnRect(setRows.get(i));
+                if (!box.empty()) {
+                    textRight(g, box, row.value(), Palette.textBody2());
+                }
+            }
+        }
+        // 底下那句说明：附属模组页说「存在它自己的配置里」，「常规」页说「只影响本机」
         int y = setRows.isEmpty() ? content.y() : setRows.get(setRows.size() - 1).bottom() + GAP;
         if (y + LINE_H <= content.bottom()) {
-            textIn(g, new R(content.x(), y, content.w(), LINE_H),
-                    "这些设置只影响你这台电脑上的面板：不进存档、不同步给服务器，也不改变任何仓库数据。",
-                    Palette.textFaint());
+            String hint = addon == null
+                    ? "这些设置只影响你这台电脑上的面板：不进存档、不同步给服务器，也不改变任何仓库数据。"
+                    : addon.summary() + "（值存在附属模组自己的配置文件里，和它自己的界面是同一份）";
+            textIn(g, new R(content.x(), y, content.w(), LINE_H), hint, Palette.textFaint());
         }
+        // 展开着的附属下拉不在这里画：这一趟（background）会被控件盖住，
+        // 改到 extractRenderState 里和原版的仓库 / 分类下拉一起画。
     }
 
     /** 「记住上次页面」按钮上的字 */
@@ -2664,6 +3155,8 @@ public class WarehouseScreen extends Screen {
 
     @Override
     public void onClose() {
+        // 关面板也算「离开这一页」：附属模组输入框里没提交的 Key 在这里落盘（不然玩家敲完随手一关就没了）
+        commitAddonText("");
         saveLastPage();
         super.onClose();
     }
@@ -2816,6 +3309,10 @@ public class WarehouseScreen extends Screen {
                     row.name = it.name;
                     row.ench = it.ench;
                     row.customName = it.customName;
+                    // 1.2.1（I5-B1 补漏）：「全部仓库」视图的合并行也是新建对象，组件变体键必须跟着搬过来。
+                    // 漏了它，合并行既显示不出「烟花 · 飞行时间 2 秒」这类注解（看起来像几件并成一件），
+                    // 点这一行取货时也会退回按名字/id 下单，拿到的是同 id 里随便哪一种。
+                    row.variant = it.variant;
                     // 1.1.3：合并行是新建的对象，服务端发来的类目键必须一起带过来。
                     // 漏掉它的话「按分类筛」在这里会一件都匹配不上：访客客户端回落到
                     // Categories.of(id) 只会得到「其他」（issue #4 实测：范围=全部仓库、分类=建筑方块 → 0 件）。
@@ -2987,8 +3484,18 @@ public class WarehouseScreen extends Screen {
      *
      * <p>0.23.0：附魔/自定义名不同的行**不能并**（否则「附魔书 · 锋利 V」与「附魔书 · 保护 III」
      * 会被合成一行，取货时也分不清该取哪种）。
+     *
+     * <p>1.2.1（I5-B1 补漏）：带组件变体的行（药水、烟花、带书页的成书…）也不能并 —— 变体键
+     * {@code item.variant} 由 id + 组件算出、与语言无关，它才是「是不是同一件」的准绳。
+     * 以前只按 id 并，于是「飞行 2 秒的烟花」和「飞行 3 秒的烟花」、「迟缓药水」和「强化迟缓药水」
+     * 会被合成一行，面板看着像只有一种，取货也只能拿到里面任意一种（AI 也一样分不出来）。
      */
     private static String itemKey(ClientSnapshot.Item it) {
+        String variant = it.variant == null ? "" : it.variant.trim();
+        if (!variant.isEmpty()) {
+            // 变体行：变体键已经把组件（含附魔/自定义名）算进去了，直接用它当合并键
+            return variant;
+        }
         String base = it.id == null || it.id.isEmpty() ? String.valueOf(it.name) : it.id;
         String ench = it.ench == null ? "" : it.ench;
         String custom = it.customName == null ? "" : it.customName;
@@ -3164,6 +3671,12 @@ public class WarehouseScreen extends Screen {
         if (it == null) {
             return "";
         }
+        // 1.2.1（I5-B1）：组件变体行的名字是服务端拿**真实 ItemStack** 取的（「抗火药水」「沙漠营地
+        // 地图」），客户端按 id 查名字表只会得到原型名（「药水」「地图」）—— 变体行必须用服务端那个，
+        // 否则好几行同名，玩家还是分不清。
+        if (it.variant != null && !it.variant.isEmpty()) {
+            return it.name == null || it.name.isEmpty() ? it.variant : it.name;
+        }
         String local = ClientNames.item(it.id);
         if (local != null && !local.isEmpty()) {
             return local;
@@ -3242,20 +3755,27 @@ public class WarehouseScreen extends Screen {
     private static String orderFill(ClientSnapshot.Item it) {
         String base;
         String local = ClientNames.item(it.id);
-        if (local != null && !local.isEmpty() && local.equals(it.name)) {
+        // 1.2.1（I5-B1）：有组件变体的行直接用变体键 —— 它由 id + 组件算出，与语言无关，
+        // 服务端 resolveEx 第一步就认它，能保证取到的是**这一行那一件**（抗火药水不会拿成夜视药水）。
+        String variant = it.variant == null ? "" : it.variant.trim();
+        if (!variant.isEmpty()) {
+            base = variant;
+        } else if (local != null && !local.isEmpty() && local.equals(it.name)) {
             base = it.name;
         } else {
             base = it.id == null || it.id.isEmpty() ? it.name : it.id;
         }
         // 0.23.0：有附魔的行拼上 `#附魔组合`，服务端据此只取对得上的那些（老服务端不认这个后缀，
-        // 但老服务端也不会下发附魔行，所以不会互相踩）
+        // 但老服务端也不会下发附魔行，所以不会互相踩）；1.2.1 起两者可以叠着用
         String ench = it.ench == null ? "" : it.ench.trim();
         return ench.isEmpty() ? base : base + '#' + ench;
     }
 
     /** 「取货」：把写的物品与数量变成一条取货指令 */
     private void orderNow() {
-        String what = orderText.trim();
+        // W-08：输入框原文过 clean()（剥控制字符 + 两端空白）。item 是 greedyString，
+        // 所以不加引号 —— 加了引号会连引号一起当成物品名的一部分。
+        String what = clean(orderText);
         if (what.isEmpty()) {
             status = "请在上方输入框中填写取货物品（例如 钻石 / diamond），再点击“取货”。";
             return;
@@ -3263,16 +3783,16 @@ public class WarehouseScreen extends Screen {
         int amount = parseOrderCount();
         if (amount == -1) {
             // 1.1.4 · 超上限不再静默压成 4096，而是像服务端一样明确说一句
-            status = "一次最多下单 4096 个（你填了 " + orderCountText.trim() + " 个），没有下单。";
+            status = "一次最多下单 4096 个。";
             return;
         }
         if (amount == -2) {
             // 1.1.5 · 填了非数字也不再静默按 1 个下单
-            status = "数量请填 1~4096 的整数（你填了「" + orderCountText.trim() + "」），没有下单。";
+            status = "数量请填 1~4096 的整数。";
             return;
         }
         run("warehouse order " + what + " " + amount,
-                "已下单：让搬运工给你取 " + amount + " 个 " + what);
+                "已下单 " + amount + " 个 " + what);
     }
 
     /**
@@ -3796,6 +4316,17 @@ public class WarehouseScreen extends Screen {
                 return;
             }
         }
+        // 附属模组页：没人点、但它自己变了（模型下载中 → 下完；装好了 → 按钮从「下载」变「删除」）就重建按钮。
+        // 每 8 tick 比一次（约 0.4 秒），INFO 行的值本来就每帧现画，不需要靠这里刷新。
+        AddonSettings setAddon = settingAddon();
+        if (setAddon != null && (++addonTick & 7) == 0) {
+            String ss = addonSig(setAddon);
+            if (!ss.equals(addonSig)) {
+                addonSig = ss;
+                rebuildWidgets();
+                return;
+            }
+        }
         if (dirBtn != null) {
             dirBtn.setMessage(Component.literal("方向：" + DIR_NAMES[dir]));
         }
@@ -4100,7 +4631,7 @@ public class WarehouseScreen extends Screen {
             case "取货" -> drawPick(g, mouseX, mouseY);
             case "搬运工" -> drawPorter(g, mouseX, mouseY);
             case "权限" -> drawPerm(g, mouseX, mouseY);
-            case "设置" -> drawSettings(g);
+            case "设置" -> drawSettings(g, mouseX, mouseY);
             default -> drawRegions(g, mouseX, mouseY);
         }
         drawStatus(g);
@@ -5836,6 +6367,12 @@ public class WarehouseScreen extends Screen {
         if (taskDd != null && taskDd.open) {
             taskDd.draw(g, mouseX, mouseY);
         }
+        for (Dropdown dd : addonChoiceDds.values()) {
+            // 「设置 → 语音取货」里的下拉：必须画在控件之后，否则会被下面的按钮盖住
+            if (dd.open) {
+                dd.draw(g, mouseX, mouseY);
+            }
+        }
         if (pending != null) {
             drawConfirm(g, mouseX, mouseY);
         }
@@ -5935,6 +6472,14 @@ public class WarehouseScreen extends Screen {
                     QueryClient.request(itemRequest(1));
                 }
                 return true;
+            }
+        }
+        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT) {
+            for (Dropdown dd : addonChoiceDds.values()) {
+                if (dd.open && dd.click(ev.x(), ev.y())) {
+                    // 附属设置页的下拉展开着：点条目就选中、点别处就收起来（两种情况都吃掉这次点击）
+                    return true;
+                }
             }
         }
         if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && clickScrollBar(ev.x(), ev.y())) {
@@ -6121,6 +6666,13 @@ public class WarehouseScreen extends Screen {
             return true;   // 弹窗时不让滚轮动到底下的列表
         }
         int step = -(int) Math.signum(dy);
+        for (Dropdown dd : addonChoiceDds.values()) {
+            if (dd.open) {
+                // 附属设置页的下拉展开着：直接交给它，别动底下的页面
+                dd.scrollBy(x, y, dy);
+                return true;
+            }
+        }
         if (pickDd != null && pickDd.open) {
             // 「取货」页的仓库下拉展开着：滚它就是滚仓库清单，别动底下的物品清单
             if (pickDd.scrollBy(x, y, dy)) {
@@ -6311,6 +6863,9 @@ public class WarehouseScreen extends Screen {
         if (pickCatDd != null) {
             pickCatDd.releaseDrag();
         }
+        for (Dropdown dd : addonChoiceDds.values()) {
+            dd.releaseDrag();   // 附属设置页里的那几个下拉
+        }
         sbRegions.release();
         sbInfo.release();
         sbItemDetail.release();
@@ -6365,6 +6920,10 @@ public class WarehouseScreen extends Screen {
             }
             return true;
         }
+        if (ev.key() == InputConstants.KEY_ESCAPE && closeAddonChoices()) {
+            // 附属设置页里展开的下拉：Esc 先把它收起来（别一步退出整个面板）
+            return true;
+        }
         if (ev.key() == InputConstants.KEY_ESCAPE && ((pickDd != null && pickDd.open) || (taskDd != null && taskDd.open)
                 || (catDd != null && catDd.open) || (pickCatDd != null && pickCatDd.open))) {
             // 页内的仓库/分类下拉：Esc 先收下拉，不退出界面
@@ -6407,7 +6966,32 @@ public class WarehouseScreen extends Screen {
             rebuildWidgets();
             return true;
         }
+        // 附属模组 TEXT 行（API Key 这类）：回车 = 提交。提交完立刻重建，占位提示换成新的打码状态。
+        // 26.3 的 KeyEvent.key() 是 SDL 扫描码（Esc=41、回车=40、小键盘回车=88），别用 GLFW 的 257/335。
+        EditBox typing = focusedAddonTextBox();
+        if (typing != null && (ev.key() == InputConstants.KEY_RETURN
+                || ev.key() == InputConstants.KEY_NUMPADENTER)) {
+            if (!typing.getValue().isEmpty()) {
+                commitAddonText("");
+                rebuildWidgets();
+            }
+            return true;
+        }
         return super.keyPressed(ev);
+    }
+
+    /** 当前焦点是不是落在某个附属模组的输入框里（是的话返回那一个，否则 null）。 */
+    private EditBox focusedAddonTextBox() {
+        var focused = getFocused();
+        if (focused == null) {
+            return null;
+        }
+        for (EditBox box : addonTextBoxes.values()) {
+            if (box == focused) {
+                return box;
+            }
+        }
+        return null;
     }
 
     @Override

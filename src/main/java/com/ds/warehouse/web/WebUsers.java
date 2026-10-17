@@ -224,14 +224,31 @@ public final class WebUsers {
     private static byte[] key() throws IOException {
         Path kp = keyPath();
         if (Files.isRegularFile(kp)) {
+            String why = null;
             try {
                 byte[] k = Base64.getDecoder().decode(Files.readString(kp).trim());
                 if (k.length == KEY_LEN) {
                     return k;
                 }
-            } catch (Throwable ignored) {
-                // 坏掉了就重新生成一把（数据文件会解不开，load 里会改名留证据）
+                why = "长度是 " + k.length + " 字节，应为 " + KEY_LEN;
+            } catch (Throwable t) {
+                why = "读不出来或不是合法 base64：" + t;
             }
+            // W-04：旧实现是静默换钥 —— 玩家看到的是「网页账号怎么突然都没了」，
+            // 日志里却一个字都没有，根本查不出原因。这里把原因写进日志，并把旧钥留一份 .bak。
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] web-key.dat {}，将重新生成密钥；"
+                    + "旧网页账号库会解不开（load 里会改名留证据）", why);
+            try {
+                Path bak = kp.resolveSibling(kp.getFileName() + ".bak");
+                if (!Files.exists(bak)) {
+                    Files.copy(kp, bak, StandardCopyOption.COPY_ATTRIBUTES);
+                    WarehouseMod.LOGGER.info("[warehouse-keeper] 旧 web-key.dat 已另存为 {}", bak.getFileName());
+                }
+            } catch (IOException copyFailed) {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 旧 web-key.dat 另存失败: {}", copyFailed.toString());
+            }
+        } else {
+            WarehouseMod.LOGGER.warn("[warehouse-keeper] 没有 web-key.dat，将新建一把密钥（首次启动属正常）");
         }
         byte[] k = new byte[KEY_LEN];
         RANDOM.nextBytes(k);

@@ -4,6 +4,7 @@ import com.ds.warehouse.WarehouseMod;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
 
@@ -12,9 +13,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -50,18 +54,19 @@ import java.util.stream.Stream;
  * <p>代价（明确记下来）：世界目录里多一个 {@code warehouse-keeper/} 目录，
  * 卸载模组不再「零残留」；把存档分享给别人时，里面的仓库坐标也一并带过去。
  *
- * <p>一次性迁移：进存档时如果发现老位置 {@code config/warehouse-keeper/worlds/&lt;存档名&gt;/}
- * 还有数据，就按「数据目录是不是这个世界建的」判断一次
- * （{@link #isOrphan(Path, String)}：老目录的创建时间早于世界目录的创建时间
- * ＝ 它属于一个已经不存在的旧存档）：
- * <ul>
- *   <li>不是孤儿 → 把五份文件复制进存档目录，老目录改名为
- *       {@code worlds/&lt;存档名&gt;.migrated-&lt;时间戳&gt;} 保留；</li>
- *   <li>是孤儿 → <b>不继承</b>，老目录改名为
- *       {@code worlds/&lt;存档名&gt;.orphan-&lt;时间戳&gt;} 保留（想找回来可以手动改回名字再进存档）。</li>
- * </ul>
- * 判定只看时间戳，因此「把整个世界文件夹复制/还原进来」会被当成新存档
- * （旧数据进 .orphan- 目录，不会自动继承）。迁移只改名、不删除，最坏情况也能人工找回。
+ * <p><b>一次性迁移（1.2.1 重写）</b>：进存档时把老位置的数据**一份不落地复制**进这个存档目录。
+ * 老位置包括 {@code config/warehouse-keeper/worlds/&lt;存档名&gt;/}、它被 1.2.0 改过名的
+ * {@code &lt;存档名&gt;.orphan-*} / {@code .migrated-*} / {@code .legacy-*} 兄弟目录，
+ * 以及更老的布局（文件直接躺在 {@code config/warehouse-keeper/} 根下、索引在 {@code index/&lt;存档名&gt;.json}）。
+ * 规矩见 {@link DataMigration}：<b>只复制，绝不删除、绝不改名，任何文件都不会被覆盖掉</b>，
+ * 一次迁移里出现的「两边都有真数据」会把来的那一份另存为 {@code &lt;名字&gt;.legacy-&lt;时间戳&gt;}，
+ * 「目标是个空壳」（例如 1.2.0 刚建出来的 402 B 空索引）会把空壳另存为 {@code .replaced-&lt;时间戳&gt;} 再顶上去。
+ *
+ * <p>判定（{@link WorldIdentity#likelyAnotherWorld} ＋ {@link WorldIdentity#pointsAt}）
+ * <b>不再决定「迁不迁」，只决定放哪儿</b>：时间上像旧存档、而且它自己记着的 worldPath 也不是这个世界时，
+ * 数据仍会全部搬进存档目录，但放在 {@code &lt;存档&gt;/warehouse-keeper/legacy-&lt;时间戳&gt;/} 下等人工确认，
+ * 不会直接顶替当前存档的数据。迁过的老目录会写 {@code .migrated.json}（记下迁进了哪个 worldId），
+ * 同一个存档再次进档直接跳过；换了新存档（新 worldId）也不会把旧数据再混进来。
  */
 public final class WorldStore {
 
@@ -73,8 +78,9 @@ public final class WorldStore {
             List.of("regions.json", "bots.json", "homes.json", "container-tags.json", "index.json");
 
     private static final String META = "meta.json";
+    /** 迁进过某个存档的老目录会留下这个标记（记 worldId / 时间 / 文件数），避免同一个存档反复搬 */
+    private static final String MIGRATION_MARKER = ".migrated.json";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
 
     private static volatile String key = "";
     private static volatile String path = "";
@@ -141,7 +147,7 @@ public final class WorldStore {
         }
     }
 
-    /** 进存档：记住这是哪个存档，建/读它的身份文件，并把老位置的数据搬进来 */
+    /** 进存档：记住这是哪个存档，把老位置的数据全部搬进来，再建/读它的身份文件 */
     public static void enter(MinecraftServer server) {
         path = rawWorldPath(server);
         key = safeName(path);
@@ -152,17 +158,20 @@ public final class WorldStore {
         } catch (IOException e) {
             WarehouseMod.LOGGER.warn("[warehouse-keeper] 建存档数据目录失败: {}", e.toString());
         }
+        // 顺序要紧：先采用老位置的 meta.json（worldId 跨迁移保持不变），再定身份，最后才搬数据
+        // ——「迁进了哪个 worldId」要在搬的时候就知道，而且必须是最终值。
+        adoptLegacyMeta(dataDir);
         readOrCreateMeta(dataDir);
-        // 老布局（config/warehouse-keeper/worlds/<存档名>/）→ 存档内目录：一次性搬迁
-        migrateLegacyDir(legacy, dataDir, path);
+        List<DataMigration.Result> reports = claimLegacy(legacy, dataDir);
         // 更老的文件：直接躺在 config/warehouse-keeper/ 根下（0.15.x 及以前），
         // 「最近玩过的那个存档」只能靠旧索引文件的修改时间判断
         String owner = lastPlayedKey();
-        migrate("regions.json", owner);
-        migrate("bots.json", owner);
-        migrate("homes.json", owner);
-        migrate("container-tags.json", owner);
-        migrateIndex();
+        reports.add(migrate("regions.json", owner));
+        reports.add(migrate("bots.json", owner));
+        reports.add(migrate("homes.json", owner));
+        reports.add(migrate("container-tags.json", owner));
+        reports.add(migrateIndex());
+        reportMigrations(reports, server);
         WarehouseMod.LOGGER.info("[warehouse-keeper] 存档数据目录: {}（存档 {}，worldId {}）",
                 dataDir, key, worldId.isEmpty() ? "?" : worldId);
     }
@@ -282,57 +291,172 @@ public final class WorldStore {
     // ------------------------------------------------------------------
     // 一次性迁移
 
-    /** 老位置 {@code worlds/<存档名>/} → 存档内目录 */
-    private static void migrateLegacyDir(Path legacy, Path dir, String worldPath) {
-        if (legacy == null || dir == null || !Files.isDirectory(legacy)) {
+    // ------------------------------------------------------------------
+    // 一次性迁移（1.2.1：只复制，绝不删除、绝不改名、绝不覆盖 —— 细节见 DataMigration）
+
+    /** 老位置的所有候选来源：原名字目录，以及 1.2.0 改过名的 .orphan-/.migrated-/.legacy- 兄弟目录 */
+    private static List<Path> legacySources(Path legacy) {
+        List<Path> sources = new ArrayList<>();
+        if (legacy == null) {
+            return sources;
+        }
+        if (Files.isDirectory(legacy)) {
+            sources.add(legacy);
+        }
+        Path parent = legacy.getParent();
+        String prefix = legacy.getFileName().toString() + ".";
+        if (parent != null && Files.isDirectory(parent)) {
+            try (Stream<Path> list = Files.list(parent)) {
+                sources.addAll(list
+                        .filter(Files::isDirectory)
+                        .filter(p -> {
+                            String name = p.getFileName().toString();
+                            return name.startsWith(prefix) && (name.contains(".orphan-")
+                                    || name.contains(".migrated-") || name.contains(".legacy-"));
+                        })
+                        .toList());
+            } catch (IOException e) {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 列老数据目录失败: {}", e.toString());
+            }
+        }
+        // 最新的来源排在最前面：同一个文件有多个来源时，由最新的那一份决定「顶掉空壳」还是「另存保留」
+        sources.sort(Comparator.comparingLong(WorldIdentity::newestFileMillis).reversed()
+                .thenComparing(p -> p.getFileName().toString()));
+        return sources;
+    }
+
+    /** 存档内还没有身份文件时，先采用老位置的 meta.json —— worldId 跨迁移保持不变 */
+    private static void adoptLegacyMeta(Path dir) {
+        if (dir == null || Files.isRegularFile(dir.resolve(META))) {
             return;
         }
-        if (same(legacy, dir)) {
-            return; // 本存档本来就用的老位置（存档内目录建不出来）
-        }
-        if (WorldIdentity.hasAnyData(dir, DATA_FILES)) {
-            // 两边都有数据：不合并、也不动老目录 —— 宁可留两份，也不覆盖任何一边
-            WarehouseMod.LOGGER.info("[warehouse-keeper] 老数据目录仍在 {}（新目录已有数据，未自动迁移，可人工处理）", legacy);
-            return;
-        }
-        if (isOrphan(legacy, worldPath)) {
-            Path orphan = renameAside(legacy, ".orphan-" + LocalDateTime.now().format(STAMP));
-            WarehouseMod.LOGGER.warn("[warehouse-keeper] {} 是更早的存档留下的数据，本次不继承；已改名保留为 {}",
-                    legacy, orphan == null ? legacy : orphan.getFileName());
-            return;
-        }
-        int moved = 0;
-        for (String name : DATA_FILES) {
-            Path from = legacy.resolve(name);
+        for (Path source : legacySources(legacyDir(key()))) {
+            Path from = source.resolve(META);
             if (!Files.isRegularFile(from)) {
                 continue;
             }
-            try {
-                Files.createDirectories(dir);
-                Files.copy(from, dir.resolve(name), StandardCopyOption.REPLACE_EXISTING);
-                moved++;
-            } catch (IOException e) {
-                WarehouseMod.LOGGER.warn("[warehouse-keeper] 迁移 {} 失败: {}", name, e.toString());
+            DataMigration.Result result = DataMigration.mergeFile(from, dir, META);
+            if (result.ok() && result.migrated() > 0) {
+                WarehouseMod.LOGGER.info("[warehouse-keeper] 采用老位置 {} 里的身份文件（worldId 保持不变）",
+                        source.getFileName());
             }
+            return;
         }
-        Path old = renameAside(legacy, ".migrated-" + LocalDateTime.now().format(STAMP));
-        WarehouseMod.LOGGER.info("[warehouse-keeper] 已把 {} 份数据从 {} 搬进存档目录（老目录保留为 {}）",
-                moved, legacy, old == null ? legacy : old.getFileName());
     }
 
-    /**
-     * 老数据是不是「一个已经不存在的存档」留下的：见 {@link WorldIdentity#isOrphan(Path, Path)}。
-     *
-     * <p>时间读不到就只能当同一个存档处理（宁可迁移，也别把玩家的数据判成孤儿）。
-     */
-    private static boolean isOrphan(Path legacy, String worldPath) {
-        if (worldPath == null || worldPath.isBlank() || "unknown-world".equals(worldPath)) {
-            return false;
+    /** 把老位置的数据全部复制进存档目录；老位置原样保留（不删除、不改名），逐份记结果 */
+    private static List<DataMigration.Result> claimLegacy(Path legacy, Path target) {
+        List<DataMigration.Result> reports = new ArrayList<>();
+        if (target == null) {
+            return reports;
+        }
+        Path world = worldDir();
+        Set<String> decided = new HashSet<>();
+        for (Path source : legacySources(legacy)) {
+            if (same(source, target) || !Files.isDirectory(source)) {
+                continue;
+            }
+            String owner = migratedInto(source);
+            if (owner != null && !owner.isEmpty() && !owner.equals(worldId)) {
+                WarehouseMod.LOGGER.info("[warehouse-keeper] {} 曾迁进存档 worldId {}，本次进的是 {}，不重复迁移",
+                        source.getFileName(), owner, worldId);
+                continue;
+            }
+            Path into = target;
+            if (WorldIdentity.likelyAnotherWorld(source, world, DATA_FILES)
+                    && !WorldIdentity.pointsAt(source, path)) {
+                into = target.resolve("legacy-" + DataMigration.stamp());
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] {} 时间上像旧存档、记的 worldPath 也不是本存档："
+                                + "数据全部复制进 {}（一个字节都没丢；确认是自己的数据后，把里面的文件移到上一层即可）",
+                        source.getFileName(), into.getFileName());
+            }
+            DataMigration.Result result = DataMigration.mergeInto(source, into, decided);
+            reports.add(result);
+            if (result.ok()) {
+                markMigrated(source, result, into);
+            } else {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] {} 有文件没迁过来，老位置原样保留，下次进档会重试",
+                        source.getFileName());
+            }
+        }
+        return reports;
+    }
+
+    /** 这份老目录已经迁进过的 worldId（读 .migrated.json），没迁过返回 null */
+    private static String migratedInto(Path source) {
+        Path marker = source.resolve(MIGRATION_MARKER);
+        if (!Files.isRegularFile(marker)) {
+            return null;
         }
         try {
-            return WorldIdentity.isOrphan(legacy, Path.of(worldPath));
+            Marker parsed = GSON.fromJson(Files.readString(marker, StandardCharsets.UTF_8), Marker.class);
+            return parsed == null ? null : parsed.worldId;
+        } catch (Exception e) {
+            return null; // 标记读不动就当没迁过（再搬一次也不会丢东西）
+        }
+    }
+
+    /** .migrated.json 的内容 */
+    private static final class Marker {
+        String worldId;
+        long at;
+    }
+
+    /** 在迁过的老目录里写个标记（不动任何数据），下次进档不再重复搬 */
+    private static void markMigrated(Path source, DataMigration.Result result, Path into) {
+        long bytes = result.bytesOf(DataMigration.Status.COPIED) + result.bytesOf(DataMigration.Status.REPLACED);
+        String json = "{\n"
+                + "  \"worldId\": " + GSON.toJson(worldId == null ? "" : worldId) + ",\n"
+                + "  \"at\": " + System.currentTimeMillis() + ",\n"
+                + "  \"into\": " + GSON.toJson(into == null ? "" : into.toString()) + ",\n"
+                + "  \"files\": " + result.migrated() + ",\n"
+                + "  \"bytes\": " + bytes + ",\n"
+                + "  \"summary\": " + GSON.toJson(result.summary()) + "\n"
+                + "}\n";
+        writeAtomic(source.resolve(MIGRATION_MARKER), tmp -> Files.writeString(tmp, json, StandardCharsets.UTF_8));
+    }
+
+    /** 迁移结果进日志，并在游戏里给玩家一行提示；失败绝不静默 */
+    private static void reportMigrations(List<DataMigration.Result> reports, MinecraftServer server) {
+        int files = 0;
+        long bytes = 0L;
+        int failed = 0;
+        for (DataMigration.Result r : reports) {
+            if (r.items().isEmpty()) {
+                continue;
+            }
+            if (r.ok()) {
+                WarehouseMod.LOGGER.info("[warehouse-keeper] 老数据迁移 {}", r.summary());
+            } else {
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 老数据迁移未完成（老位置数据没动，下次进档会重试）{}", r.summary());
+            }
+            files += r.migrated();
+            bytes += r.bytesOf(DataMigration.Status.COPIED) + r.bytesOf(DataMigration.Status.REPLACED);
+            failed += r.count(DataMigration.Status.FAILED);
+        }
+        if (files == 0 && failed == 0) {
+            return;
+        }
+        String msg = failed > 0
+                ? String.format(Locale.ROOT, "[仓库] 老数据迁移：%d 个文件已复制进本存档，%d 个失败（老位置数据没动，详见日志）",
+                        files, failed)
+                : String.format(Locale.ROOT, "[仓库] 老数据迁移：%d 个文件（%d 字节）已复制进本存档目录", files, bytes);
+        try {
+            server.getPlayerList().broadcastSystemMessage(Component.literal(msg), false);
         } catch (Throwable t) {
-            return false;
+            // 单机刚加载、还没进人：日志里已经记全了
+        }
+    }
+
+    /** 当前世界目录（拿不到返回 null） */
+    private static Path worldDir() {
+        if (path == null || path.isBlank() || "unknown-world".equals(path)) {
+            return null;
+        }
+        try {
+            return Path.of(path);
+        } catch (Throwable t) {
+            return null;
         }
     }
 
@@ -341,18 +465,6 @@ public final class WorldStore {
             return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
         } catch (Throwable t) {
             return false;
-        }
-    }
-
-    /** 改名保留（不删除任何东西）；失败返回 null，调用方按原路径记日志 */
-    private static Path renameAside(Path dir, String suffix) {
-        Path to = dir.resolveSibling(dir.getFileName() + suffix);
-        try {
-            Files.move(dir, to, StandardCopyOption.REPLACE_EXISTING);
-            return to;
-        } catch (IOException e) {
-            WarehouseMod.LOGGER.warn("[warehouse-keeper] 归档老数据目录 {} 失败（内容原样保留）: {}", dir, e.toString());
-            return null;
         }
     }
 
@@ -455,39 +567,22 @@ public final class WorldStore {
         return best;
     }
 
-    private static void migrate(String name, String owner) {
+    /** 老文件（0.15.x 及以前直接躺在 config 根下）：同样只复制、不搬走 */
+    private static DataMigration.Result migrate(String name, String owner) {
         Path legacy = base().resolve(name);
-        Path target = file(name);
-        if (!Files.isRegularFile(legacy) || Files.exists(target)) {
-            return;
+        if (!Files.isRegularFile(legacy)) {
+            return new DataMigration.Result(name, List.of());
         }
         if (owner != null && !owner.equals(key())) {
             // 老文件是别的存档的：留着，等那个存档进来时再搬（免得又串一次档）
             WarehouseMod.LOGGER.info("[warehouse-keeper] 老文件 {} 属于存档 {}，这次进的是 {}，先不迁移",
                     name, owner, key());
-            return;
+            return new DataMigration.Result(name, List.of());
         }
-        try {
-            Files.createDirectories(target.getParent());
-            Files.move(legacy, target, StandardCopyOption.REPLACE_EXISTING);
-            WarehouseMod.LOGGER.info("[warehouse-keeper] 已把老的 {} 迁移到当前存档目录", name);
-        } catch (IOException e) {
-            WarehouseMod.LOGGER.warn("[warehouse-keeper] 迁移 {} 失败: {}", name, e.toString());
-        }
+        return DataMigration.mergeFile(legacy, dir(), name);
     }
 
-    private static void migrateIndex() {
-        Path legacy = base().resolve("index").resolve(key() + ".json");
-        Path target = file("index.json");
-        if (!Files.isRegularFile(legacy) || Files.exists(target)) {
-            return;
-        }
-        try {
-            Files.createDirectories(target.getParent());
-            Files.move(legacy, target, StandardCopyOption.REPLACE_EXISTING);
-            WarehouseMod.LOGGER.info("[warehouse-keeper] 已把老的索引 index/{}.json 迁移到当前存档目录", key());
-        } catch (IOException e) {
-            WarehouseMod.LOGGER.warn("[warehouse-keeper] 迁移索引失败: {}", e.toString());
-        }
+    private static DataMigration.Result migrateIndex() {
+        return DataMigration.mergeFile(base().resolve("index").resolve(key() + ".json"), dir(), "index.json");
     }
 }

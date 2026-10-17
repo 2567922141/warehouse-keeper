@@ -29,6 +29,15 @@ public final class WarehouseIndex {
     public final Map<String, ItemEntry> items = new LinkedHashMap<>();
 
     /**
+     * 变体索引：key = {@link Variants#keyOf} 给出的变体键。
+     *
+     * <p>没有组件差异的物品，键就是物品 id（所以 {@code variants} 里一定有 {@code items} 的每一项）；
+     * 有组件差异的（药水、地图、染色装备、烟花、成书…）才会多出 {@code id@哈希} 这一层，
+     * 让面板与搜索能指名到「抗火药水」而不是笼统的「药水」。用户 m35220 提的持久方案。
+     */
+    public final Map<String, VariantEntry> variants = new LinkedHashMap<>();
+
+    /**
      * 附魔索引：附魔注册名（含命名空间）→ (容器 key → 该附魔在这个容器里的最高等级)。
      *
      * <p>内层用 TreeMap，所以 {@link #enchantHits} 拿到的顺序天然按容器 key 排好。
@@ -73,6 +82,7 @@ public final class WarehouseIndex {
         revision++;
         containers.clear();
         items.clear();
+        variants.clear();
         enchants.clear();
         customNames.clear();
         scannedContainers = 0;
@@ -177,6 +187,25 @@ public final class WarehouseIndex {
             }
         }
         return n;
+    }
+
+    /**
+     * 落在这些区域里的容器键（不删任何东西）。
+     *
+     * <p>给「删仓库」用：索引清掉这些容器的同时，{@code container-tags.json} 里对应的标签
+     * 也要一起清，否则箱子物理上还在、标签留着，以后在同一坐标放的新箱子会继承旧标签（报告 W-01）。
+     */
+    public List<String> keysIn(List<Region> regions) {
+        if (regions == null || regions.isEmpty()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        for (Map.Entry<String, ContainerRecord> e : containers.entrySet()) {
+            if (insideAny(e.getValue(), regions)) {
+                out.add(e.getKey());
+            }
+        }
+        return out;
     }
 
     /**
@@ -323,10 +352,18 @@ public final class WarehouseIndex {
             totalStacks++;
             totalItems += count;
             String id = ItemIds.of(ss.stack());
-            ItemEntry entry = items.computeIfAbsent(id, k -> new ItemEntry(k, ss.stack().getHoverName().getString()));
+            ItemEntry entry = items.computeIfAbsent(id, k -> new ItemEntry(k, Variants.displayName(ss.stack())));
             entry.total += count;
             entry.maxStackSize = Math.max(entry.maxStackSize, ss.stack().getMaxStackSize());
             entry.refs.add(new SlotRef(rec.dimension, rec.pos, ss.slot(), count, rec.blockId));
+
+            // 变体层：同一个 id 下按组件区分（普通物品这里 key 就等于 id，与上一行等价）
+            String variantKey = Variants.keyOf(ss.stack());
+            VariantEntry ve = variants.computeIfAbsent(variantKey, k -> new VariantEntry(k, id,
+                    Variants.displayName(ss.stack()), Variants.note(ss.stack())));
+            ve.total += count;
+            ve.maxStackSize = Math.max(ve.maxStackSize, ss.stack().getMaxStackSize());
+            ve.refs.add(new SlotRef(rec.dimension, rec.pos, ss.slot(), count, rec.blockId));
         }
     }
 
@@ -355,6 +392,23 @@ public final class WarehouseIndex {
             if (entry.total <= 0 && entry.refs.isEmpty()) {
                 items.remove(id);
             }
+
+            String variantKey = Variants.keyOf(ss.stack());
+            VariantEntry ve = variants.get(variantKey);
+            if (ve == null) {
+                continue;
+            }
+            ve.total -= count;
+            for (int r = 0; r < ve.refs.size(); r++) {
+                SlotRef ref = ve.refs.get(r);
+                if (ref.dimension().equals(rec.dimension) && ref.pos().equals(rec.pos) && ref.slot() == ss.slot()) {
+                    ve.refs.remove(r);
+                    break;
+                }
+            }
+            if (ve.total <= 0 && ve.refs.isEmpty()) {
+                variants.remove(variantKey);
+            }
         }
     }
 
@@ -367,6 +421,7 @@ public final class WarehouseIndex {
     public void reaggregate() {
         revision++;
         items.clear();
+        variants.clear();
         totalStacks = 0;
         totalItems = 0;
         for (ContainerRecord rec : containers.values()) {
@@ -379,6 +434,41 @@ public final class WarehouseIndex {
     public List<ItemEntry> sortedItems() {
         List<ItemEntry> list = new ArrayList<>(items.values());
         list.sort(Comparator.comparingLong((ItemEntry e) -> e.total).reversed());
+        return list;
+    }
+
+    /** 某个物品 id 下的所有组件变体（普通物品只有一条，键就是 id），按总数降序 */
+    public List<VariantEntry> variantsOf(String itemId) {
+        List<VariantEntry> list = new ArrayList<>();
+        for (VariantEntry v : variants.values()) {
+            if (v.itemId.equals(itemId)) {
+                list.add(v);
+            }
+        }
+        list.sort(Comparator.comparingLong((VariantEntry v) -> v.total).reversed());
+        return list;
+    }
+
+    /** 这个物品 id 是不是**真的**有不止一种组件（多于一栏时才需要玩家指名） */
+    public boolean hasVariants(String itemId) {
+        int n = 0;
+        for (VariantEntry v : variants.values()) {
+            if (v.itemId.equals(itemId) && ++n > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 按变体键取一栏（就是物品 id 时也拿得到） */
+    public VariantEntry variant(String variantKey) {
+        return variantKey == null ? null : variants.get(variantKey);
+    }
+
+    /** 全部变体，按总数降序 */
+    public List<VariantEntry> sortedVariants() {
+        List<VariantEntry> list = new ArrayList<>(variants.values());
+        list.sort(Comparator.comparingLong((VariantEntry v) -> v.total).reversed());
         return list;
     }
 
@@ -409,9 +499,54 @@ public final class WarehouseIndex {
         }
     }
 
+    /**
+     * 一个「组件变体」的汇总：同一个物品 id 下，组件不同就分开算一栏。
+     *
+     * <p>{@link #key} 是落盘与传参用的身份；{@link #note} 是给人看的短注解
+     * （「药水：fire_resistance」「染色：#A06540」），普通物品为空串。
+     */
+    public static final class VariantEntry {
+        public final String key;
+        /** 所属物品 id（{@link Variants#itemIdOf(String)}） */
+        public final String itemId;
+        /** 显示名：取自**真实 ItemStack** 的 hover name（所以自定义名、附魔名都在） */
+        public String displayName;
+        /** 关键组件的短注解；空串 = 没有可说的组件 */
+        public final String note;
+        public long total;
+        public int maxStackSize = 64;
+        public final List<SlotRef> refs = new ArrayList<>();
+
+        public VariantEntry(String key, String itemId, String displayName, String note) {
+            this.key = key;
+            this.itemId = itemId;
+            this.displayName = displayName;
+            this.note = note == null ? "" : note;
+        }
+
+        /** 「抗火药水（药水：fire_resistance）」；没有注解时就是显示名 */
+        public String label() {
+            return note.isEmpty() ? displayName : displayName + "（" + note + "）";
+        }
+
+        /** 该变体占了多少个「整组」 */
+        public String stacksText() {
+            if (maxStackSize <= 1) {
+                return total + " 个";
+            }
+            long full = total / maxStackSize;
+            long rest = total % maxStackSize;
+            if (full == 0) {
+                return total + " 个";
+            }
+            return total + " 个 (" + full + " 组" + (rest > 0 ? " + " + rest : "") + ")";
+        }
+    }
+
     public record SlotRef(String dimension, BlockPos pos, int slot, int count, String blockId) {
         public String coordText() {
             return pos.getX() + "," + pos.getY() + "," + pos.getZ();
         }
     }
 }
+

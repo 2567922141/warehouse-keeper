@@ -766,6 +766,15 @@ public final class Scanner {
             idx.skippedChunks = skippedChunks;
             idx.lastScanMillis = (System.nanoTime() - startNanos) / 1_000_000L;
             finished = true;
+            // W-02：start() 已经把「本次要扫的区域」从索引里删掉了（局部重扫只删这些区域，全量扫描
+            // 整份清空），中止时这些区域并没有被扫回来 —— 不处理的话这片区域会从索引里长期消失，
+            // 直到下一次全量扫描。把「当前还没扫完的区域」交回增量刷新队列，等这轮结束后自动重扫。
+            if (!regions.isEmpty()) {
+                int from = Math.max(0, Math.min(regionIndex, regions.size() - 1));
+                IndexRefresh.markRegions(regions.subList(from, regions.size()));
+                WarehouseMod.LOGGER.warn("[warehouse-keeper] 中止：{} 个区域已交回增量刷新队列，稍后自动重扫",
+                        regions.size() - from);
+            }
             WarehouseMod.LOGGER.warn("[warehouse-keeper] 扫描中止: {}", reason);
         }
 

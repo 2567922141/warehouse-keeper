@@ -73,8 +73,19 @@ public final class IndexRefresh {
         }
         return true;
     }
-    /** 增量更新跑这么多轮（约 1 分钟）就整份重算一次兜底，防止长期累积出小偏差 */
-    private static final int FULL_REAGG_ROUNDS = 60;
+    /**
+     * 累计增删了多少条容器记录之后整份重算一次兜底，防止长期累积出小偏差。
+     *
+     * <p>1.1.6 起从「每 60 轮」改成「每 2000 条变化」（报告 W-12）：原来只要这轮有任何变化就计数，
+     * 高频增删时平均每 60 轮一定有一次全量尖峰；按变化条数计就只在真正干了很多活之后才重算，
+     * 大仓库长时间小改动（每秒一两只箱子）的尖峰次数会降一个数量级。
+     *
+     * <p><b>为什么不做「按区域分片重算」</b>：分片要先把汇总清空再一片片加回来，中途玩家看到的是
+     * 残缺的库存；而 {@link WarehouseIndex#accept} 内部会先按同坐标减掉旧记录，重建过程中若有箱子
+     * 被拆掉/替换，减掉的是还没加回来的贡献，反而会造出负数。真要做得分片建<b>影子汇总</b>、
+     * 全部建完再原子换入，并把重建期间的变化补挂回去 —— 风险大于这次兜底能省下的收益，故留作后续。
+     */
+    private static final int FULL_REAGG_CHANGES = 2000;
 
     /** 待局部重扫的仓库名（保持插入顺序，先进先出） */
     private static final Set<String> STALE = new LinkedHashSet<>();
@@ -84,8 +95,8 @@ public final class IndexRefresh {
     private static int pollCooldown = POLL_TICKS;
     /** 抽查游标：每轮从上次停下的地方接着走，避免总盯着前几只箱子 */
     private static int pollCursor;
-    /** 距上次整份重算过了多少轮（见 {@link #FULL_REAGG_ROUNDS}） */
-    private static int roundsSinceFullReagg;
+    /** 距上次整份重算累计了多少条容器增删（见 {@link #FULL_REAGG_CHANGES}） */
+    private static int changesSinceFullReagg;
     private static int replacedTotal;
     private static int rescanTotal;
 
@@ -357,9 +368,10 @@ public final class IndexRefresh {
         for (ContainerRecord rec : fresh) {
             WarehouseMod.INDEX.accept(rec);
         }
-        // 兜底：增量更新跑满 FULL_REAGG_ROUNDS 轮就整份重算一次，长期累积的小偏差会被抹平
-        if (++roundsSinceFullReagg >= FULL_REAGG_ROUNDS) {
-            roundsSinceFullReagg = 0;
+        // 兜底：累计增删够多（FULL_REAGG_CHANGES）就整份重算一次，长期累积的小偏差会被抹平
+        changesSinceFullReagg += fresh.size() + dead.size();
+        if (changesSinceFullReagg >= FULL_REAGG_CHANGES) {
+            changesSinceFullReagg = 0;
             WarehouseMod.INDEX.reaggregate();
         }
         WebSnapshot.markDirty();

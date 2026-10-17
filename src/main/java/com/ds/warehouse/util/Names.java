@@ -3,6 +3,7 @@ package com.ds.warehouse.util;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.Item;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 
@@ -118,7 +119,11 @@ public final class Names {
             if (id != null && BuiltInRegistries.ITEM.containsKey(id)) {
                 Item it = BuiltInRegistries.ITEM.getValue(id);
                 if (it != null) {
-                    String n = new ItemStack(it).getHoverName().getString();
+                    // 用「物品自己的基础名」而不是 new ItemStack(it).getHoverName()：
+                    // 后者在 26.3 是看栈说话的（Item.getName(ItemStack)），空栈的药水会得到
+                    // 「不可合成的药水」、烟花得到「烟花火箭」但说明不了变体 —— 面板「哪一格是
+                    // 哪一变体」另有 Variants.note() 注解，这里只要物品级的基础名。
+                    String n = Component.translatable(it.getDescriptionId()).getString();
                     if (n != null && !n.isBlank() && !isRawKey(n)) {
                         name = n;
                     }

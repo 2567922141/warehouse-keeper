@@ -45,6 +45,17 @@ public final class ClientSnapshot {
          * 都算成「其他」（取货页的类目下拉曾经只剩「全部分类 / 其他」）。有值就优先用它。
          */
         public String category = "";
+        /**
+         * 1.2.1（I5-B1）：这一行的**组件变体键**，例如 {@code minecraft:potion@1a2b3c4d5e}；空 = 这行的
+         * 物品没有组件差异（或老服务端不发）。
+         *
+         * <p>同 id 不同数据的物品（药水/地图/染色装备/烟花/成书…）现在每种组件组合一行，靠这个字段
+         * 区分。它是由 id 与组件算出来的、**与语言无关**，所以点单直接把它填进取货框最稳：
+         * 服务端 {@code Porter.resolveEx} 第一步就认这个键，绝不会拿另一种药水顶包。
+         *
+         * <p><b>字段名必须与 {@code SnapshotSync.ItemDto.variant} 一字不差</b>：两边用 Gson 按字段名对拷。
+         */
+        public String variant = "";
     }
 
     /** 箱子总览的一行（批次 4）。双联箱在服务端索引里就是一条记录，所以一只箱子一行 */

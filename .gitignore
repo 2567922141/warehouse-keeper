@@ -57,3 +57,6 @@ devenv.local.yaml
 
 # 开发期辅助脚本（客户端驱动、布局自检、RCON、分类语料）：只在本地保留，不进仓库
 tools/
+
+# 发布成品：jar 走 GitHub Releases，不入库（本地 dist/ 仍可留作打包核对）
+/dist/

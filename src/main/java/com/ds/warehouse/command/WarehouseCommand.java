@@ -176,14 +176,19 @@ public final class WarehouseCommand {
                                             RegionStore.save();
                                             // 仓库没了，索引里落在它范围内的容器也必须一起清掉，
                                             // 否则查询 / 下单 / 整理仍会选中这些箱子
+                                            // W-01：标签得跟着一起清 —— 箱子物理上还在，但它已经不属于任何
+                                            // 仓库了；标签留着的话，以后在同一个坐标放的新箱子会继承旧标签
+                                            // （收件箱/取件箱语义跟着串台），而且 container-tags.json 只增不减。
+                                            List<String> keys = WarehouseMod.INDEX.keysIn(List.of(removed));
+                                            int tags = ContainerTags.dropKeys(keys);
                                             WarehouseMod.INDEX.removeContainersIn(List.of(removed));
                                             WarehouseMod.INDEX.reaggregate();
-                                            // 区域内的箱子标签这里不动：ContainerTags 只有全局的 repair / pruneMissing
-                                            // （只删「箱子已经不在」的标签），没有按区域清理的方法；
-                                            // 而这些箱子物理上还在，标签得由玩家用 /warehouse tag clear 或 tag prune 清理
-                                            Audit.add(adminName(ctx.getSource()), "删仓库", "删掉了仓库「" + name + "」");
+                                            Audit.add(adminName(ctx.getSource()), "删仓库", "删掉了仓库「" + name + "」"
+                                                    + (tags > 0 ? "，同时清掉 " + tags + " 条箱子标签" : "，区域内没有箱子标签"));
                                             send(ctx.getSource(), "已删除仓库 " + name
-                                                    + "（区域内箱子的标签没动，需要的话用 /warehouse tag prune 清一遍）");
+                                                    + (tags > 0
+                                                            ? "（同时清掉了 " + tags + " 条箱子标签）"
+                                                            : "（区域内没有箱子标签）"));
                                             return 1;
                                         }))))
                 .then(Commands.literal("scan").requires(WarehouseCommand::admin)
@@ -1364,7 +1369,7 @@ public final class WarehouseCommand {
         }
         // 1.1.4 · 与严格库存语义一致：超过单次上限不再静默压成上限，而是明确拒绝
         if (count > Porter.MAX_ORDER) {
-            send(src, "一次最多下单 " + Porter.MAX_ORDER + " 个（你说了 " + count + " 个），没有下单。");
+            send(src, "一次最多 " + Porter.MAX_ORDER + " 个。");
             return 0;
         }
         count = Math.max(1, count);
@@ -1373,8 +1378,18 @@ public final class WarehouseCommand {
             send(src, err);
             return 0;
         }
-        send(src, "已下单 " + count + " 个 " + query + "，送到后用 /warehouse porter 查看进度。");
-        Audit.add(player.getGameProfile().name(), "取物品", "下单要 " + count + " 个「" + query + "」");
+        // I5-opt1：库存不足时 Porter 会按库存下单，并把「实际数量」和一句说明交回来
+        int placed = Porter.lastPlacedCount();
+        String shortNote = Porter.takePlacedNote();
+        if (placed <= 0) {
+            placed = count;
+        }
+        send(src, "已下单 " + placed + " 个 " + query + "（/warehouse porter 看进度）");
+        if (shortNote != null) {
+            send(src, shortNote);
+        }
+        Audit.add(player.getGameProfile().name(), "取物品", "下单要 " + count + " 个「" + query + "」"
+                + (placed != count ? "（库存只够 " + placed + " 个，按库存下单）" : ""));
         return 1;
     }
 
@@ -1985,6 +2000,29 @@ public final class WarehouseCommand {
                 }
             }
             if (hits.isEmpty()) {
+                // 1.2.1（I5-B1）：同 id 不同数据的物品按组件分了行，中文名只存在于**变体行**上
+                // （「抗火药水」「沙漠营地地图」），id 级那行的名字还是「药水」「地图」——
+                // 所以「找不到」之前先在变体行里按名字/注解找一遍。
+                List<WarehouseIndex.VariantEntry> named = new ArrayList<>();
+                for (WarehouseIndex.VariantEntry v : idx.variants.values()) {
+                    if (v.note.isEmpty()) {
+                        continue;
+                    }
+                    if (v.displayName.toLowerCase(Locale.ROOT).contains(q)
+                            || v.note.toLowerCase(Locale.ROOT).contains(q)) {
+                        named.add(v);
+                    }
+                }
+                if (!named.isEmpty()) {
+                    named.sort(Comparator.comparingLong((WarehouseIndex.VariantEntry v) -> v.total).reversed());
+                    send(src, "匹配到 " + named.size() + " 种（按组件区分的物品），显示前 10 种：");
+                    for (int i = 0; i < Math.min(10, named.size()); i++) {
+                        WarehouseIndex.VariantEntry v = named.get(i);
+                        send(src, "  " + v.label() + "  x" + v.total + "  " + v.key);
+                    }
+                    send(src, "取货时把上面那一整串键填进取货框即可指定这一种。");
+                    return;
+                }
                 send(src, "找不到与「" + query + "」匹配的物品");
                 return;
             }
@@ -2006,6 +2044,21 @@ public final class WarehouseCommand {
             return;
         }
         send(src, e.displayName + "  " + id);
+        // 1.2.1（I5-B1）：这个 id 有好几种组件数据时，先把它们列出来（药水/地图/染色装备/烟花…），
+        // 否则玩家只能看到 id 级的总量，根本不知道仓库里其实有好几种不同的东西
+        List<WarehouseIndex.VariantEntry> variants = idx.variantsOf(id);
+        if (variants.size() > 1) {
+            send(src, "这个 id 有 " + variants.size() + " 种不同数据的物品（按组件区分）：");
+            for (int i = 0; i < Math.min(20, variants.size()); i++) {
+                WarehouseIndex.VariantEntry v = variants.get(i);
+                send(src, "  " + v.label() + "  x" + v.total + "  " + v.key);
+            }
+            if (variants.size() > 20) {
+                send(src, "  ...（还有 " + (variants.size() - 20) + " 种）");
+            }
+            send(src, "取货时把上面的键整串填进取货框（例如 /warehouse order " + variants.get(0).key
+                    + " 1）就能取到指定那一种。");
+        }
         send(src, "总量 " + e.total + "  [" + e.stacksText() + "]  分布 " + e.refs.size() + " 槽位:");
         int shown = 0;
         for (WarehouseIndex.SlotRef ref : e.refs) {

@@ -157,6 +157,11 @@ public final class QueryClient {
 
     /** 强制重发上一次的请求（「刷新」按钮） */
     public static void refresh(int kind) {
+        // W-07：WANT / CACHE 都是按 SLOTS 开的数组，kind 越界会抛 AIOOBE。
+        // 现在没有越界的调用点，但「刷新」按钮传的是界面里的页签号，加一道闸更稳。
+        if (kind <= 0 || kind >= SLOTS) {
+            return;
+        }
         Request r = WANT[kind] != null ? WANT[kind] : last(kind);
         if (r != null) {
             CACHE[kind] = null;

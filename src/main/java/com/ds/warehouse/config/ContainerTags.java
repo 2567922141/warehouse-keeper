@@ -25,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -454,6 +455,29 @@ public final class ContainerTags {
         MAP.remove(key);
         dirty = true;
         return true;
+    }
+
+    /**
+     * 按键批量清掉标签（删仓库时用：区域里的箱子物理上还在，但已经不属于任何仓库了）。
+     *
+     * <p>只清调用方点名的那几条，不做任何推断；返回值是真正清掉的条数。
+     *
+     * @return 清掉了几条
+     */
+    public static int dropKeys(Collection<String> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return 0;
+        }
+        int n = 0;
+        for (String k : keys) {
+            if (k != null && MAP.remove(k) != null) {
+                n++;
+            }
+        }
+        if (n > 0) {
+            dirty = true;
+        }
+        return n;
     }
 
     /** 清掉指向「已经不在的箱子」的标签（只在玩家明确要求时调用，绝不自动删） */

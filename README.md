@@ -16,8 +16,8 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 
 模组同时提供客户端与服务端内容：联机时服务端负责索引与作业，客户端负责面板与中文物品名；单人游戏下两者同时生效。
 
-### 当前主要维护适用于 Minecraft 26.3的版本（V1.1.4及以上）。
-#### V1.1.3及更早的模组版本适配 Minecraft 26.2，若需要下载并安装适用于 Minecraft 26.2的模组版本，[点击此处前往模组26.2分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)，[点击此处前往V1.1.3发行版下载界面](https://github.com/2567922141/warehouse-keeper/releases#release-v1.1.3)
+### 当前主要维护适用于 Minecraft 26.3的版本（mod版本V1.1.4及以上）。
+#### mod版本V1.1.3及更早的模组版本适配 Minecraft 26.2，若需要下载并安装适用于 Minecraft 26.2的模组版本，[点击此处前往模组26.2分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)，[点击此处前往V1.1.3发行版下载界面](https://github.com/2567922141/warehouse-keeper/releases#release-v1.1.3)
 
 ## 2.功能特性
 

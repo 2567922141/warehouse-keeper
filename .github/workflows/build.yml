@@ -1,0 +1,52 @@
+name: build
+
+# 每次 push（含开发分支）、PR、以及网页上手动触发时，自动编译一遍。
+# 目的：编译不过的提交在 GitHub 上就能看到红叉，不用等玩家装包才发现。
+on:
+  push:
+    branches:
+      - "26.2"
+      - "26.3"
+      - "dev/**"
+  pull_request:
+    branches:
+      - "26.2"
+      - "26.3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 26.3 线编译目标是 JDK 25（见 gradle.properties 里的说明）。
+      - name: 安装 JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      # Windows 上提交的 gradlew 没有可执行位，Linux runner 需要补一下。
+      - name: 让 gradlew 可执行
+        run: chmod +x gradlew
+
+      - name: 编译（含单元测试）
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: 列出产物
+        run: ls -l build/libs/
+
+      - name: 上传 jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: warehouse-keeper-jar
+          path: build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 30

@@ -185,8 +185,6 @@ src/main/java/com/ds/warehouse/
 └── util/                  权限、名称表、审计与通用工具
 src/main/resources/        fabric.mod.json 与语言文件
 history/                   版本更新记录（update-history.md，README 只保留跳转链接）
-docs/                      开发规范与文案风格
-scripts/                   本地校验脚本（copycheck.ps1）
 release-notes/             各版本的发行说明
 photo/                     README 与发行说明里引用的界面截图
 CHANGELOG.md               开发期的变更记录（[Unreleased] 段）

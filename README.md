@@ -209,11 +209,31 @@ dist/                      本地打包出来的模组 jar（**不入库**，随
 
 各版本迭代摘要已移到单独文档：[history/update-history.md](history/update-history.md)。
 
-## 14.模组兼容性
+## 14.第三方组件与声明
+
+本项目自身以 MIT 许可发布。运行、构建或使用内置语音时还会用到下列第三方项目，它们的版权归各自作者所有；完整声明（含 Carpet 的 MIT 全文）见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+| 组件 | 版本 | 许可 | 与本项目的关系 | 来源 |
+| --- | --- | --- | --- | --- |
+| fabric-carpet（Carpet Mod） | 26.3 | MIT（© 2020 gnembon） | 随主包以 Jar-in-Jar 内置；搬运工**只通过 `/player` 指令**使用它，不引用其类、不加其 Mixin | [GitHub](https://github.com/gnembon/fabric-carpet) · [Modrinth](https://modrinth.com/mod/carpet) |
+| Fabric Loader | 0.19.5（0.19.3+） | Apache-2.0 | 运行期依赖，不打包 | [GitHub](https://github.com/FabricMC/fabric-loader) |
+| Fabric API | 0.161.0+26.3 | Apache-2.0 | 运行期依赖，不打包 | [GitHub](https://github.com/FabricMC/fabric-api) |
+| Minecraft（Mojang） | 26.3 | Mojang EULA（专有） | 运行环境，不打包 | [EULA](https://www.minecraft.net/eula) |
+| warehouse-keeper-voice | 0.5.0 | MIT（© 2026 2567922141） | 本项目的附属模组（同一作者），随主包内置、**默认关闭** | [GitHub](https://github.com/2567922141/warehouse-keeper-voice) |
+| sherpa-onnx（JVM 绑定） | 1.13.8 | Apache-2.0 | 语音包内置的离线识别引擎，随语音代码一起打进主包 | [GitHub](https://github.com/k2-fsa/sherpa-onnx) |
+| onnxruntime | 随 sherpa-onnx | MIT（© Microsoft） | 语音包内置的推理运行时（含 Windows 原生 DLL） | [GitHub](https://github.com/microsoft/onnxruntime) |
+
+补充说明：
+
+- **语音识别模型不随包分发**。SenseVoice、Paraformer、Zipformer-CTC 等模型由用户在 设置 → 语音取货 → 模型管理 里按需下载，许可随模型发布方；本项目不镜像、不修改这些模型。
+- 内置的 Carpet 与语音包都在 `META-INF/jars/` 下，mods 里另装同名模组时由 Fabric Loader 按 root 优先只保留一份，不会重复加载。
+- 除上述项目外，本项目的其余代码（含界面、指令、索引与搬运逻辑）均为本项目原创，按根目录 `LICENSE`（MIT）发布。
+
+## 15.模组兼容性
 
 - [Carpet](https://github.com/gnembon/fabric-carpet)：已内置；搬运工以可见人形出现
 - [warehouse-keeper-voice](https://github.com/2567922141/warehouse-keeper-voice)：已内置 0.5.0（默认关闭），该模组暂不支持 Minecraft 26.2。
 
-## 15.许可证
+## 16.许可证
 
 本项目采用 [MIT](LICENSE) 许可证。

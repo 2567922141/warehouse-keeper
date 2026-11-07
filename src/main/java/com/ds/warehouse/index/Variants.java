@@ -381,11 +381,36 @@ public final class Variants {
                 || type == DataComponents.BUCKET_ENTITY_DATA) {
             return null; // 整坨实体 NBT，列出来只会刷屏
         }
-        // 兜底：认不出来的组件（多半是模组加的）也用简称，并把值里的命名空间剥掉，别露出一串 id
+        // 兜底：认不出来的组件（多半是模组加的）。
+        // issue #7 BUG2：以前拼成「quality："poor"」——组件 id 是给代码看的，SNBT 引号也不是给人看的。
+        // 现在：认得的组件用中文标签 + 干净的值；认不得的只显示值（前缀「属性」），值本身也去掉引号；
+        // 值实在拿不到就不显示，宁可少说一句，也不把内部 id 甩给玩家。
         String id = componentId(type);
-        String label = LABELS.getOrDefault(id, tail(id));
-        String raw = stripNamespaces(shorten(canonicalValue(c)));
+        String raw = plainValue(v);
+        if (raw.isEmpty()) {
+            raw = unquote(stripNamespaces(shorten(canonicalValue(c))));
+        }
+        String label = LABELS.get(id);
+        if (label == null) {
+            return raw.isEmpty() ? "" : "属性：" + raw;
+        }
         return raw.isEmpty() ? "" : label + "：" + raw;
+    }
+
+    /** 组件值的「人话」写法：字符串原样（不带引号）、数字/布尔照原样；其余类型交给调用方退回 SNBT。 */
+    private static String plainValue(Object v) {
+        if (v instanceof String s) {
+            return s.isBlank() ? "" : s;
+        }
+        if (v instanceof Number || v instanceof Boolean) {
+            return String.valueOf(v);
+        }
+        return "";
+    }
+
+    /** 去掉 SNBT 文本里的引号（`"poor"` → `poor`；复合值里的引号也一并去掉，读起来更像人话）。 */
+    private static String unquote(String text) {
+        return text.replace("\"", "");
     }
 
     /** 本地化文本是否真的翻出来了：没翻译的 translatable 会原样返回 key，绝不能显示给玩家。 */
@@ -640,11 +665,6 @@ public final class Variants {
     private static String componentId(DataComponentType<?> type) {
         Identifier id = BuiltInRegistries.DATA_COMPONENT_TYPE.getKey(type);
         return id == null ? "?" : id.toString();
-    }
-
-    private static String tail(String id) {
-        int colon = id.indexOf(':');
-        return colon >= 0 ? id.substring(colon + 1) : id;
     }
 
     /** 组件值 → 规范 NBT 文本（CompoundTag 的键递归排序，保证同一份数据每次都得到同一串） */

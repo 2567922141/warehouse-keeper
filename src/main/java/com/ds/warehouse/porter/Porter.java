@@ -245,7 +245,9 @@ public final class Porter {
         }
         // F-D5-1：这单货所在仓库没有任何假人值守时**当场**说清楚，
         // 不要先回「已下单」再在 tick 里异步失败（玩家会在 /warehouse porter 里才发现）
-        List<String> where = itemRegions(entry);
+        // 1.2.2（issue #8 BUG1）：按**变体行**的槽位算，否则同 id 其它变体的库存会被算进来。
+        List<WarehouseIndex.SlotRef> pool = refsFor(entry.itemId, variant);
+        List<String> where = regionsOf(pool);
         if (where.isEmpty()) {
             return "「" + entry.displayName + "」不在仓库范围内。";
         }
@@ -275,7 +277,7 @@ public final class Porter {
             if (!anyBotOn(List.of(region))) {
                 continue;
             }
-            long inRegion = regionTotal(entry, region);
+            long inRegion = supplyIn(pool, region);
             if (inRegion > staffedMost) {
                 staffedMost = inRegion;
                 staffedBest = region;
@@ -390,7 +392,8 @@ public final class Porter {
             if (v.note.isEmpty()) {
                 continue; // 没组件差异的留给 ③，别和 id 级重名判定打架
             }
-            if (q.equalsIgnoreCase(v.displayName) || q.equalsIgnoreCase(v.label()) || q.equalsIgnoreCase(v.note)) {
+            if (q.equalsIgnoreCase(v.displayName) || q.equalsIgnoreCase(v.label())
+                    || q.equalsIgnoreCase(v.note) || q.equalsIgnoreCase(v.rowName())) {
                 namedVariants.add(v);
             }
         }
@@ -1014,8 +1017,10 @@ public final class Porter {
                 finish(server, o, "仓库里找不到「" + o.displayName + "」。", true);
                 continue;
             }
-            // 挑一个闲着的假人：只能是「值守仓库里真有这单货」的那一位
-            String pick = pickBotFor(entry);
+            // 挑一个闲着的假人：只能是「值守仓库里真有这单货」的那一位；
+            // 1.2.2（issue #8 BUG1）：按**能供应的数量**挑（大的先来），而不是按 refs 顺序遇到谁算谁 ——
+            // 否则 A 仓 44 个、B 仓 23 个时，B 的假人先空出来就会报「只有 23 个」。
+            String pick = pickBotFor(o);
             if (pick == null) {
                 List<String> where = itemRegions(entry);
                 if (where.isEmpty()) {
@@ -1035,8 +1040,9 @@ public final class Porter {
             }
             // 只从「这个假人值守的仓库」里取货，别的仓库的东西一概不动
             String botRegion = Bots.regionOf(pick) == null ? "" : Bots.regionOf(pick);
+            List<WarehouseIndex.SlotRef> pool = refsFor(o.itemId, o.variant);
             List<WarehouseIndex.SlotRef> mine = new ArrayList<>();
-            for (WarehouseIndex.SlotRef ref : entry.refs) {
+            for (WarehouseIndex.SlotRef ref : pool) {
                 if (botRegion.equals(regionOfPos(ref.dimension(), ref.pos()))) {
                     mine.add(ref);
                 }
@@ -1047,14 +1053,23 @@ public final class Porter {
                 continue;
             }
             // 1.1.5：下单时按「有人值守的仓库」校过一次，这里再按**这个假人值守的仓库**核一次
-            // （下单与派单之间索引可能已经变了）。不够就明确失败，绝不把少拿当成功。
-            long available = 0L;
-            for (WarehouseIndex.SlotRef ref : mine) {
-                available += ref.count();
-            }
+            // （下单与派单之间索引可能已经变了）。
+            // 1.2.2（issue #8 BUG1）：本仓不够、但别的有假人仓库够时，**不算失败**，留在队里等那边的
+            // 搬运工空出来（以前会直接失败，玩家看到「只有 23 个」却忽略另一仓还有几千个）。
+            long available = supplyIn(pool, botRegion);
             if (available < o.count) {
+                long bestStaffed = 0L;
+                for (String region : regionsOf(pool)) {
+                    if (anyBotOn(List.of(region))) {
+                        bestStaffed = Math.max(bestStaffed, supplyIn(pool, region));
+                    }
+                }
+                if (bestStaffed >= o.count) {
+                    o.state = "等有货的搬运工空出来";
+                    return;
+                }
                 PENDING.pollFirst();
-                finish(server, o, "「" + o.displayName + "」只有 " + available + " 个（要 " + o.count
+                finish(server, o, "「" + o.displayName + "」只有 " + bestStaffed + " 个（要 " + o.count
                         + " 个），没取货。", true);
                 continue;
             }
@@ -1095,17 +1110,25 @@ public final class Porter {
     }
 
     /**
-     * 挑一个闲着的假人来接这单：**只认「值守仓库里真有这单货」的假人**。
+     * 挑一个闲着的假人来接这单：**只认「值守仓库里真有这单货」的假人**，并且**优先挑能供最多货的那一位**。
      *
      * <p>没分配值守仓库的假人一律不派活，也绝不退而求其次让别人值守的假人跨仓库取货 ——
      * 这就是「假人只在自己那一间仓库里干活，互不干扰」这条硬规则。
-     * 都忙着（或没人值守有货的仓库）就返回 null，由调用方决定是排队还是拒绝。
+     *
+     * <p>1.2.2（issue #8 BUG1）：以前按 {@code entry.refs} 顺序找「第一个空闲的」，不看它那间仓库
+     * 到底有多少货，于是「A 仓 44 个、B 仓 23 个」时会挑到 B 并报「只有 23 个」。现在按各仓库
+     * 能供应的数量从多到少挑，供应为 0 的仓库不派活（交给调用方排队或说清楚）。
      */
-    private static String pickBotFor(WarehouseIndex.ItemEntry entry) {
-        if (entry == null) {
+    private static String pickBotFor(Order o) {
+        if (o == null) {
             return null;
         }
-        List<String> free = new ArrayList<>();
+        List<WarehouseIndex.SlotRef> pool = refsFor(o.itemId, o.variant);
+        if (pool.isEmpty()) {
+            return null;
+        }
+        String best = null;
+        long bestSupply = 0L;
         for (Bots.Entry e : Bots.list()) {
             if (busyWithOrder(e.name) || Tasks.busy(e.name) || idle(e.name).collecting) {
                 continue;
@@ -1118,23 +1141,16 @@ public final class Porter {
             if (r.isEmpty() || RegionStore.REGIONS.get(r) == null) {
                 continue;
             }
-            free.add(e.name);
-        }
-        if (free.isEmpty()) {
-            return null;
-        }
-        for (WarehouseIndex.SlotRef ref : entry.refs) {
-            String region = regionOfPos(ref.dimension(), ref.pos());
-            if (region == null) {
+            long supply = supplyIn(pool, r);
+            if (supply <= 0) {
                 continue;
             }
-            for (String n : free) {
-                if (region.equals(Bots.regionOf(n))) {
-                    return n;
-                }
+            if (supply > bestSupply) {
+                bestSupply = supply;
+                best = e.name;
             }
         }
-        return null;
+        return best;
     }
 
     /** 这单货在哪些仓库里（按 refs 算，去重，顺序稳定） */
@@ -1575,15 +1591,47 @@ public final class Porter {
     // ------------------------------------------------------------------
     // 收尾
 
-    /** 某个仓库范围内这件物品的合计数量（取货只认「假人值守的那一间仓库」的量）。 */
-    private static long regionTotal(WarehouseIndex.ItemEntry entry, String region) {
+    /**
+     * 这一单可取的槽位：指定了组件变体时用<b>变体行</b>的 refs（否则会把同 id 其它变体的数量算进来），
+     * 没指定就用 id 级的全部槽位。
+     *
+     * <p>附魔不在这里过滤：附魔要真的打开箱子读 ItemStack 才能确认，留给 {@link #takeOne} 逐格核对。
+     *
+     * @param itemId  物品 id
+     * @param variant 变体键；空串表示不限定
+     */
+    private static List<WarehouseIndex.SlotRef> refsFor(String itemId, String variant) {
+        if (variant != null && !variant.isEmpty()) {
+            WarehouseIndex.VariantEntry v = WarehouseMod.INDEX.variant(variant);
+            if (v != null) {
+                return v.refs;
+            }
+        }
+        WarehouseIndex.ItemEntry e = WarehouseMod.INDEX.items.get(itemId);
+        return e == null ? List.of() : e.refs;
+    }
+
+    /** 这些槽位里落在 {@code region} 范围内的合计数量。 */
+    private static long supplyIn(List<WarehouseIndex.SlotRef> pool, String region) {
         long sum = 0L;
-        for (WarehouseIndex.SlotRef ref : entry.refs) {
+        for (WarehouseIndex.SlotRef ref : pool) {
             if (region.equals(regionOfPos(ref.dimension(), ref.pos()))) {
                 sum += ref.count();
             }
         }
         return sum;
+    }
+
+    /** 这些槽位涉及哪些仓库（去重、顺序稳定）。 */
+    private static List<String> regionsOf(List<WarehouseIndex.SlotRef> pool) {
+        List<String> out = new ArrayList<>();
+        for (WarehouseIndex.SlotRef ref : pool) {
+            String r = regionOfPos(ref.dimension(), ref.pos());
+            if (r != null && !out.contains(r)) {
+                out.add(r);
+            }
+        }
+        return out;
     }
 
     /** 追加一条给玩家看的说明，不覆盖先前的（例如「仅剩 N 个」要在「已送达」之后仍能看到）。 */

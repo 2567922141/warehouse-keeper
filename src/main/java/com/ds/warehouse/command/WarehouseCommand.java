@@ -163,6 +163,23 @@ public final class WarehouseCommand {
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> mergeRegion(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "name")))))
+                        // issue #8 新功能①：仓库代表颜色（#RRGGBB / 颜色名 / random；只在显示里用）
+                        .then(Commands.literal("color")
+                                .then(Commands.argument("name", NameArgument.name())
+                                        .suggests(REGION_SUGGEST)
+                                        .executes(ctx -> setRegionColor(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name"), ""))
+                                        .then(Commands.argument("value", NameArgument.name())
+                                                .executes(ctx -> setRegionColor(ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "name"),
+                                                        StringArgumentType.getString(ctx, "value"))))))
+                        .then(Commands.literal("rename")
+                                .then(Commands.argument("old", NameArgument.name())
+                                        .suggests(REGION_SUGGEST)
+                                        .then(Commands.argument("new", NameArgument.name())
+                                                .executes(ctx -> renameRegion(ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "old"),
+                                                        StringArgumentType.getString(ctx, "new"))))))
                         .then(Commands.literal("remove")
                                 .then(Commands.argument("name", NameArgument.name())
                                         .suggests(REGION_SUGGEST)
@@ -413,6 +430,17 @@ public final class WarehouseCommand {
                                         .suggests(REGION_SUGGEST)
                                         .executes(ctx -> porterPreview(ctx.getSource(),
                                                 StringArgumentType.getString(ctx, "region")))))
+                        .then(Commands.literal("fetch").requires(WarehouseCommand::admin)
+                                .then(Commands.argument("x", IntegerArgumentType.integer())
+                                        .then(Commands.argument("y", IntegerArgumentType.integer())
+                                                .then(Commands.argument("z", IntegerArgumentType.integer())
+                                                        .then(Commands.argument("region", NameArgument.name())
+                                                                .suggests(REGION_SUGGEST)
+                                                                .executes(ctx -> porterFetch(ctx.getSource(),
+                                                                        IntegerArgumentType.getInteger(ctx, "x"),
+                                                                        IntegerArgumentType.getInteger(ctx, "y"),
+                                                                        IntegerArgumentType.getInteger(ctx, "z"),
+                                                                        StringArgumentType.getString(ctx, "region"))))))))
                         .then(Commands.literal("stop").requires(WarehouseCommand::admin).executes(ctx -> porterStopAll(ctx.getSource()))))
                 .then(Commands.literal("bot").requires(WarehouseCommand::admin)
                         .executes(ctx -> botList(ctx.getSource()))
@@ -487,6 +515,18 @@ public final class WarehouseCommand {
                 .then(Commands.literal("user")
                         .then(Commands.literal("list").requires(WarehouseCommand::admin)
                                 .executes(ctx -> userList(ctx.getSource())))
+                        // 1.2.2（issue #8 BUG2）：以前只能「修改已有玩家的权限」，新玩家永远进不了表，
+                        // 提示里给的 /warehouse user perm 又要求先有记录 —— 权限页就成了死循环。
+                        .then(Commands.literal("add").requires(WarehouseCommand::admin)
+                                .then(Commands.argument("name", NameArgument.name())
+                                        .suggests(USER_SUGGEST)
+                                        .executes(ctx -> userAdd(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name")))))
+                        .then(Commands.literal("remove").requires(WarehouseCommand::admin)
+                                .then(Commands.argument("name", NameArgument.name())
+                                        .suggests(USER_SUGGEST)
+                                        .executes(ctx -> userRemove(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name")))))
                         .then(Commands.literal("perm").requires(WarehouseCommand::admin)
                                 .then(Commands.argument("name", NameArgument.name())
                                         .suggests(USER_SUGGEST)
@@ -674,10 +714,12 @@ public final class WarehouseCommand {
 
     /** {@code /warehouse user perm <名字> <take|bot|tidy> on|off} —— 管理员：改某个玩家的权限 */
     private static int userPerm(CommandSourceStack src, String name, String kind, String onoff) {
+        // 1.2.2（issue #8 BUG2）：表里没有这个人时**直接建一行**（默认三项都关，下面再改），
+        // 不再回「还没有权限记录」把管理员卡死。
         PlayerPerms.Perm old = PlayerPerms.perm(name);
-        if (old == null) {
-            send(src, "「" + name + "」还没有权限记录。用 /warehouse user list 查看现有玩家。");
-            return 0;
+        boolean created = old == null;
+        if (created) {
+            old = new PlayerPerms.Perm(false, false, false);
         }
         boolean on = !onoff.equalsIgnoreCase("off") && !onoff.equals("关") && !onoff.equals("false");
         boolean take = old.take();
@@ -694,8 +736,33 @@ public final class WarehouseCommand {
         }
         PlayerPerms.setPerm(name, take, bot, tidy);
         PlayerPerms.Perm now = new PlayerPerms.Perm(take, bot, tidy);
-        Audit.add(adminName(src), "改权限", "把「" + name + "」的权限改成：" + now.text());
-        send(src, "「" + name + "」现在的权限：" + now.text());
+        Audit.add(adminName(src), created ? "添加权限" : "改权限", "把「" + name + "」的权限改成：" + now.text());
+        send(src, (created ? "已添加「" + name + "」并设置权限：" : "「" + name + "」现在的权限：") + now.text());
+        return 1;
+    }
+
+    /** {@code /warehouse user add <名字>} —— 管理员：把玩家加进权限表（默认只开「取货」） */
+    private static int userAdd(CommandSourceStack src, String name) {
+        if (PlayerPerms.has(name)) {
+            PlayerPerms.Perm now = PlayerPerms.perm(name);
+            send(src, "「" + name + "」已经在权限表里了：" + (now == null ? "" : now.text()));
+            return 1;
+        }
+        PlayerPerms.setPerm(name, true, false, false);
+        Audit.add(adminName(src), "添加权限", "把「" + name + "」加进权限表（取货 开 / 指挥搬运工 关 / 整理仓库 关）");
+        send(src, "已添加「" + name + "」：取货 开 / 指挥搬运工 关 / 整理仓库 关。可在面板里改这三项。");
+        return 1;
+    }
+
+    /** {@code /warehouse user remove <名字>} —— 管理员：把玩家从权限表里删掉（= 收回全部权限） */
+    private static int userRemove(CommandSourceStack src, String name) {
+        if (!PlayerPerms.has(name)) {
+            send(src, "「" + name + "」不在权限表里。");
+            return 0;
+        }
+        PlayerPerms.remove(name);
+        Audit.add(adminName(src), "移除权限", "把「" + name + "」从权限表里删除");
+        send(src, "已把「" + name + "」从权限表里删除，他不再有取货/指挥/整理权限。");
         return 1;
     }
 
@@ -808,6 +875,48 @@ public final class WarehouseCommand {
      * 现在按「值守仓库」分组，同一间仓库里的闲置假人一起开工，并给每人分配 1/N 的箱子（见
      * {@link Tasks#start(net.minecraft.server.MinecraftServer, String, int, String, int, int)}）。
      */
+    /**
+     * {@code /warehouse porter fetch <x> <y> <z> <仓库>} —— 把一只<b>仓库范围外</b>的暂存箱整理进仓库。
+     *
+     * <p>与 {@link #porterTask} 的区别：来源箱不在索引里，坐标由命令显式给出；只派**一名**值守该
+     * 仓库的空闲假人（一只箱子不需要分片），其余条件（暂存标签、不在任何仓库范围内、区块已加载）
+     * 由 {@link Tasks#startFetch} 逐条检查并把原因回给玩家。
+     */
+    private static int porterFetch(CommandSourceStack src, int x, int y, int z, String region) {
+        MinecraftServer server = src.getServer();
+        if (region.isBlank()) {
+            send(src, "请指定要送进哪个仓库：/warehouse porter fetch <x> <y> <z> <仓库>。");
+            return 0;
+        }
+        if (!RegionStore.REGIONS.containsKey(region)) {
+            send(src, noRegion(region));
+            return 0;
+        }
+        Bots.Entry pick = null;
+        for (Bots.Entry e : freeBots(region)) {
+            if (region.equals(e.region)) {
+                pick = e;
+                break;
+            }
+        }
+        if (pick == null) {
+            send(src, Bots.list().isEmpty()
+                    ? noBotsYet("porter", false)
+                    : "仓库「" + region + "」当前没有空闲的搬运工，请等它干完再来。");
+            sendDispatchBlockers(src, region);
+            return 0;
+        }
+        String dim = src.getLevel().dimension().identifier().toString();
+        String why = Tasks.startFetch(server, pick.name, region, dim, new BlockPos(x, y, z));
+        if (why != null) {
+            send(src, why);
+            return 0;
+        }
+        send(src, "已让「" + Bots.displayOf(pick.name) + "」把 " + x + " " + y + " " + z
+                + " 的暂存箱整理进仓库「" + region + "」。");
+        return 1;
+    }
+
     private static int porterTask(CommandSourceStack src, int kind, String region) {
         MinecraftServer server = src.getServer();
         if (RegionStore.REGIONS.isEmpty()) {
@@ -1854,6 +1963,104 @@ public final class WarehouseCommand {
         out.add(slab);
     }
 
+    /**
+     * /warehouse region color &lt;仓库&gt; [颜色] —— 查看/设置仓库代表色（issue #8 新功能①）。
+     *
+     * <p>颜色只用于边界长方体与面板色块，不参与库存/区域判定；写法见
+     * {@link com.ds.warehouse.util.RegionColors#parse(String)}（{@code #RRGGBB}、预设中文名、{@code random}）。
+     * 不带颜色参数时只回显当前颜色，方便玩家先看再改。
+     */
+    private static int setRegionColor(CommandSourceStack src, String rawName, String rawColor) {
+        String name = rawName.toLowerCase(Locale.ROOT);
+        Region r = RegionStore.REGIONS.get(name);
+        if (r == null) {
+            send(src, noRegion(name));
+            return 0;
+        }
+        if (rawColor == null || rawColor.isBlank()) {
+            String preset = com.ds.warehouse.util.RegionColors.presetName(r.color);
+            send(src, "仓库 " + r.name + " 的代表颜色：" + com.ds.warehouse.util.RegionColors.hex(r.color)
+                    + (preset.isEmpty() ? "" : "（" + preset + "）")
+                    + "。改法：/warehouse region color " + r.name + " <#RRGGBB|红|绿|蓝|…|random>");
+            return 1;
+        }
+        Integer rgb = com.ds.warehouse.util.RegionColors.parse(rawColor);
+        if (rgb == null) {
+            send(src, "颜色写法不对：「" + rawColor + "」。可用 #RRGGBB、随机（random），或这些名字："
+                    + String.join("、", com.ds.warehouse.util.RegionColors.PRESETS.keySet()));
+            return 0;
+        }
+        r.color = rgb;
+        RegionStore.save();
+        String hex = com.ds.warehouse.util.RegionColors.hex(rgb);
+        Audit.add(adminName(src), "改颜色", "把仓库「" + r.name + "」的代表颜色改成 " + hex);
+        send(src, "已把仓库 " + r.name + " 的代表颜色改成 " + hex + "。");
+        return 1;
+    }
+
+    /**
+     * /warehouse region rename &lt;旧名&gt; &lt;新名&gt; —— 给仓库改名（issue #7 新功能）。
+     *
+     * <p>只改名字：几何、箱子归属、索引、箱子标签全不动（它们按坐标判断，不存仓库名）。
+     * 需要跟着改的只有两处：`regions.json` 的键 / {@link Region#name}，以及名册里
+     * {@code bot.region} 的值（假人值守的是「名字」）。有假人正在整理这个仓库时拒绝改名，
+     * 免得任务做到一半 region 名对不上。
+     */
+    private static int renameRegion(CommandSourceStack src, String rawOld, String rawNew) {
+        String from = rawOld.toLowerCase(Locale.ROOT);
+        String to = rawNew.toLowerCase(Locale.ROOT);
+        if (from.equals(to)) {
+            send(src, "新旧名字一样，没有改名。");
+            return 0;
+        }
+        Region old = RegionStore.REGIONS.get(from);
+        if (old == null) {
+            send(src, noRegion(from));
+            return 0;
+        }
+        if (RegionStore.REGIONS.containsKey(to)) {
+            send(src, "已经有仓库叫「" + to + "」了，换个名字。");
+            return 0;
+        }
+        for (Bots.Entry e : Bots.list()) {
+            String busy = Tasks.regionOf(e.name);
+            if (busy != null && busy.equalsIgnoreCase(from)) {
+                send(src, "搬运工「" + Bots.displayOf(e.name) + "」正在整理「" + from + "」，等它结束再改名。");
+                return 0;
+            }
+        }
+        // 保持原顺序：重建一份 LinkedHashMap，把旧键原位换成新键后整体替换内容（REGIONS 的引用不变）
+        Region renamed = new Region(to, old.dimension, old.min(), old.max());
+        renamed.fullHeight = old.fullHeight;
+        Map<String, Region> ordered = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, Region> en : RegionStore.REGIONS.entrySet()) {
+            if (en.getKey().equals(from)) {
+                ordered.put(to, renamed);
+            } else {
+                ordered.put(en.getKey(), en.getValue());
+            }
+        }
+        RegionStore.REGIONS.clear();
+        RegionStore.REGIONS.putAll(ordered);
+        int moved = 0;
+        for (Bots.Entry e : Bots.list()) {
+            if (e.region != null && e.region.equalsIgnoreCase(from)) {
+                if (Bots.assign(e.name, to)) {
+                    moved++;
+                }
+            }
+        }
+        if (moved > 0) {
+            Bots.save();
+        }
+        RegionStore.save();
+        Audit.add(adminName(src), "改仓库名", "把仓库「" + from + "」改名为「" + to + "」"
+                + (moved > 0 ? "，同时更新 " + moved + " 个假人的值守仓库" : ""));
+        send(src, "已把仓库「" + from + "」改名为「" + to + "」"
+                + (moved > 0 ? "，并更新了 " + moved + " 个假人的值守仓库。" : "。"));
+        return 1;
+    }
+
     /** /warehouse region merge <名字> —— 把当前 pos1..pos2 圈出来的范围并进已有仓库 */
     private static int mergeRegion(CommandSourceStack src, String rawName) {
         Region r = lookupRegion(src, rawName);
@@ -2695,7 +2902,7 @@ public final class WarehouseCommand {
         BlockPos pos = explicit;
         if (pos == null) {
             if (p == null) {
-                send(src, "控制台没法看箱子，请给出坐标：/warehouse tag show <x> <y> <z>");
+                send(src, "控制台无法读取箱子内容，请提供坐标：/warehouse tag show <x> <y> <z>");
                 return null;
             }
             net.minecraft.world.phys.Vec3 eye = p.getEyePosition();

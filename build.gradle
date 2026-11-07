@@ -36,12 +36,21 @@ dependencies {
 	// 等它出 26.3 版，改回版本号并取消注释即可。发布物本来就不含它。
 	// runtimeOnly "maven.modrinth:cyberanner-ironchest:2.0.8"
 
-	// 同样只是开发期运行：Carpet 的 /player 能在无头服务器里造出假玩家，
-	// 这样就能实测「/warehouse region grow <名字>（扩到玩家所在位置）」
-	// 和「/warehouse region merge <名字>（并进 pos1~pos2）」这两条必须
-	// 有真实 ServerPlayer 才能跑的路径。也不进发布 jar。
-	// 26.3 线：Carpet 同样跟到 26.3。
-	runtimeOnly "maven.modrinth:carpet:26.3"
+	// Carpet：搬运工假人（/player）靠它。1.3.0 起打进发布 jar（Jar-in-Jar）：
+	// 玩家只装主体 mod 就有搬运工，不必自己再装 Carpet。
+	// 用户 mods 里另外装了 Carpet 时，Fabric Loader 优先用 mods 目录那份
+	// （root 优先、同一 mod id 只选一个），不会 duplicate。
+	// Carpet 是 MIT，版权与许可声明见 THIRD-PARTY-NOTICES.md。
+	// 仅 include（Loom 的 include 配置自带依赖，不需要 modImplementation）
+	include "maven.modrinth:carpet:${project.carpet_version}"
+
+	// 语音附属包：1.3.0 起内置进主体 jar，默认关闭（见 SherpaEngine.enabled）。
+	// 语音源码不在本仓库（.gitignore 的 /voice/，由独立仓库同步过来构建），
+	// 所以只在存在时打包：干净克隆 / CI 里没有 voice/ 目录，构建出的 jar 不含语音，
+	// 其余功能不受影响。
+	if (file('voice/build.gradle').exists()) {
+		include project(':voice')
+	}
 }
 
 processResources {

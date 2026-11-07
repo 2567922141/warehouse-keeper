@@ -24,6 +24,8 @@ public final class RegionCache {
         public int[] from = new int[]{0, 0, 0};
         public int[] to = new int[]{0, 0, 0};
         public boolean fullHeight = true;
+        /** 代表颜色（0xRRGGBB，默认白色）：边界的填色与面板色块都用它 */
+        public int color = 0xFFFFFF;
 
         public int minX() { return Math.min(from[0], to[0]); }
         public int minY() { return Math.min(from[1], to[1]); }
@@ -31,6 +33,13 @@ public final class RegionCache {
         public int maxX() { return Math.max(from[0], to[0]); }
         public int maxY() { return Math.max(from[1], to[1]); }
         public int maxZ() { return Math.max(from[2], to[2]); }
+
+        public boolean covers(int x, int y, int z) {
+            if (x < minX() || x > maxX() || z < minZ() || z > maxZ()) {
+                return false;
+            }
+            return fullHeight || (y >= minY() && y <= maxY());
+        }
 
         public long volume() {
             int h = fullHeight ? WORLD_HEIGHT : (maxY() - minY() + 1);
@@ -68,6 +77,23 @@ public final class RegionCache {
         return ENTRIES;
     }
 
+    /**
+     * 这一格在不在任何仓库范围内（1.3.0 · issue #8 新增③：只有范围外的箱子才提供「整理入仓」）。
+     *
+     * <p>判定与面板的「分布在哪几个仓库」同一口径：同维度 + 水平范围 + 全高度时不看 Y。
+     */
+    public static boolean contains(String dimension, int x, int y, int z) {
+        if (dimension == null) {
+            return false;
+        }
+        for (Entry e : ENTRIES) {
+            if (e.dimension.equals(dimension) && e.covers(x, y, z)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static String note() {
         return note;
     }
@@ -89,6 +115,7 @@ public final class RegionCache {
                 e.dimension = r.dimension;
             }
             e.fullHeight = r.fullHeight;
+            e.color = r.color;
             e.from = r.from == null ? new int[]{0, 0, 0} : r.from.clone();
             e.to = r.to == null ? new int[]{0, 0, 0} : r.to.clone();
             ENTRIES.add(e);

@@ -524,6 +524,15 @@ public final class WarehouseIndex {
             this.note = note == null ? "" : note;
         }
 
+        /**
+         * 面板/聊天里显示的那一行名字：`显示名 · 注解`（与 `Variants.rowName` 同格式）。
+         *
+         * <p>取货页点一行时填进输入框的就是它 —— 玩家看到什么就能改什么，不再显示 `id@hash`。
+         */
+        public String rowName() {
+            return note.isEmpty() ? displayName : displayName + " · " + note;
+        }
+
         /** 「抗火药水（药水：fire_resistance）」；没有注解时就是显示名 */
         public String label() {
             return note.isEmpty() ? displayName : displayName + "（" + note + "）";

@@ -69,7 +69,11 @@ public final class ContainerTagBar {
      */
     private static final int MISS_LIMIT = 12;
     /** 附加按钮：自动 / 暂存 / 清除 */
-    private static final int EXTRA = 3;
+    /**
+     * 附加按钮个数：自动分类 / 暂存 / 清除标签，加上 1.3.0 的「入仓仓库」与「整理入仓」
+     * （后两个只在「箱子不在任何仓库范围内 + 已开暂存」时出现，其余情况不占位）。
+     */
+    private static final int EXTRA = 5;
     /** 下拉清单每行高度（和仓库面板的下拉同一套手感） */
     private static final int LINE_H = 12;
     /**
@@ -107,6 +111,16 @@ public final class ContainerTagBar {
         boolean open;
         /** 上次是不是「锁定」状态（自动档 / 暂存箱时不许手选分类） */
         boolean lastLocked;
+        /**
+         * 1.3.0 · issue #8 新增③：箱子在仓库范围外并开了「暂存」时，多出「入仓仓库 / 整理入仓」两个按钮。
+         *
+         * <p>{@link #showFetch} 只在「范围外 + 暂存开」时置真；{@link #fetchRegion} 是玩家在下拉里选的
+         * 目标仓库（空串 = 还没选，此时「整理入仓」不可点）；{@link #openRegion} 表示当前展开的是
+         * 仓库清单而不是分类清单。
+         */
+        boolean showFetch;
+        String fetchRegion = "";
+        boolean openRegion;
         /** 展开时那张下拉清单的几何（和仓库面板里的下拉同一套配色） */
         int listX;
         int listY;
@@ -190,6 +204,7 @@ public final class ContainerTagBar {
                     if (holder.lastLocked) {
                         return;   // 自动档 / 暂存箱：按钮已置灰，这里再兜一次底
                     }
+                    holder.openRegion = false;   // 两张清单共用一块几何，开一张就收另一张
                     holder.open = !holder.open;
                     holder.scroll = 0;
                     refresh(holder);
@@ -198,6 +213,10 @@ public final class ContainerTagBar {
                 holder.extras.add(add(screen, 0, 0, 43, () -> tag(holder, "auto")));
                 holder.extras.add(add(screen, 0, 0, 43, () -> tag(holder, "staging")));
                 holder.extras.add(add(screen, 0, 0, 43, () -> tag(holder, "clear")));
+                // 1.3.0 · issue #8 新增③：范围外暂存箱 → 选目标仓库 + 整理入仓
+                // （两个按钮平时不占位、不可见，见 refresh() 里的 showFetch）
+                holder.extras.add(add(screen, 0, 0, TagBarLayout.WIDE, () -> toggleFetchList(holder)));
+                holder.extras.add(add(screen, 0, 0, TagBarLayout.WIDE, () -> fetchInto(holder)));
 
                 // 点清单 → 选分类；点别处 → 收起；都吃掉这次点击，免得误碰箱子槽位
                 ScreenMouseEvents.allowMouseClick(screen).register((s, event) -> clickList(holder, event));
@@ -244,6 +263,51 @@ public final class ContainerTagBar {
     /** 现在可以对着发指令的锁定坐标：已锁定、且那一格现在仍是容器；否则 null */
     private static BlockPos lockedTarget(Holder holder) {
         return isContainer(Minecraft.getInstance(), holder.locked) ? holder.locked : null;
+    }
+
+    /**
+     * 1.3.0 · issue #8 新增③：「入仓仓库」下拉的开合。
+     *
+     * <p>只在 {@link Holder#showFetch} 为真（箱子在仓库范围外 + 开了暂存）时可点；展开仓库清单时
+     * 顺手收起分类清单 —— 两张清单共用同一块几何，同时展开会互相盖住。
+     */
+    private static void toggleFetchList(Holder holder) {
+        if (!holder.showFetch) {
+            return;
+        }
+        holder.open = false;
+        holder.openRegion = !holder.openRegion;
+        holder.scroll = 0;
+        refresh(holder);
+    }
+
+    /**
+     * 1.3.0 · issue #8 新增③：「整理入仓」——让值守所选仓库的搬运工把这只箱子的东西搬进去。
+     *
+     * <p>两道条件都满足才发指令：已选仓库（下拉里点过）+ 已锁定坐标。其余前置条件（暂存标签、
+     * 不在任何仓库范围内、区块已加载）由服务端 {@code Tasks#checkFetchSource} 复核并回原因，
+     * 客户端这里只负责不把明显不成立的选择发出去。
+     */
+    private static void fetchInto(Holder holder) {
+        BlockPos pos = lockedTarget(holder);
+        if (pos == null || holder.fetchRegion.isEmpty()) {
+            return;
+        }
+        send("warehouse porter fetch " + coords(pos) + " " + holder.fetchRegion);
+        holder.fetchRegion = "";
+        holder.openRegion = false;
+        refresh(holder);
+    }
+
+    /** 「整理入仓」可选的仓库名（按客户端快照的顺序；空仓库列表时下拉为空） */
+    private static List<String> fetchRegions() {
+        List<String> out = new ArrayList<>();
+        for (RegionCache.Entry e : RegionCache.list()) {
+            if (e.name != null && !e.name.isEmpty()) {
+                out.add(e.name);
+            }
+        }
+        return out;
     }
 
     /**
@@ -297,7 +361,7 @@ public final class ContainerTagBar {
 
     /** 点下拉清单：选中一项就发指令并收起，点清单外面只是收起 —— 两种情况都吃掉这次点击，免得误碰箱子槽位 */
     private static boolean clickList(Holder holder, MouseButtonEvent event) {
-        if (!holder.open) {
+        if (!holder.open && !holder.openRegion) {
             return true;
         }
         int index = event.button() == InputConstants.MOUSE_BUTTON_LEFT ? indexAt(holder, event.x(), event.y()) : -1;
@@ -306,6 +370,7 @@ public final class ContainerTagBar {
             return false;
         }
         holder.open = false;
+        holder.openRegion = false;
         refresh(holder);
         return false;
     }
@@ -340,10 +405,24 @@ public final class ContainerTagBar {
             return -1;
         }
         int index = holder.scroll + row;
-        return index < catsOf(holder).size() ? index : -1;
+        return index < listKeys(holder).size() ? index : -1;
+    }
+
+    /** 当前展开的是哪张清单：仓库清单（{@link Holder#openRegion}）还是分类清单 */
+    private static List<String> listKeys(Holder holder) {
+        return holder.openRegion ? fetchRegions() : catsOf(holder);
     }
 
     private static void pick(Holder holder, int index) {
+        if (holder.openRegion) {
+            List<String> regions = fetchRegions();
+            if (index >= 0 && index < regions.size()) {
+                holder.fetchRegion = regions.get(index);
+            }
+            holder.openRegion = false;
+            refresh(holder);
+            return;
+        }
         BlockPos pos = lockedTarget(holder);   // 同 tag()：发指令只认锁定坐标
         List<String> keys = catsOf(holder);
         if (pos != null && index >= 0 && index < keys.size()) {
@@ -422,7 +501,7 @@ public final class ContainerTagBar {
 
     /** 自绘下拉清单：深底 + 蓝框 + 当前项打勾 + 悬停高亮（与仓库面板的「仓库：… ▾」同一套） */
     private static void drawList(Holder holder, GuiGraphicsExtractor g, int mouseX, int mouseY) {
-        if (!holder.open || holder.listH <= 0 || holder.listW <= 0) {
+        if ((!holder.open && !holder.openRegion) || holder.listH <= 0 || holder.listW <= 0) {
             return;
         }
         // 箱子标签栏可能先于仓库面板出现（面板没开过时 Palette 还是默认主题）⇒ 这里也按偏好同步一次
@@ -434,8 +513,9 @@ public final class ContainerTagBar {
         border(g, holder.listX, holder.listY, x1, y1, Palette.accentBorder());
 
         holder.hover = indexAt(holder, mouseX, mouseY);
-        String current = currentCategory(holder);
-        List<String> keys = catsOf(holder);
+        boolean regions = holder.openRegion;
+        String current = regions ? holder.fetchRegion : currentCategory(holder);
+        List<String> keys = listKeys(holder);
         for (int row = 0; row < holder.rows; row++) {
             int index = holder.scroll + row;
             if (index >= keys.size()) {
@@ -452,7 +532,7 @@ public final class ContainerTagBar {
             }
             // 显示名走 Categories.displayName（创造栏页签的中文名 / 旧类目名 / 「其他」），
             // 模组页签名可能很长，按清单宽度用既有的 fit 截断
-            String name = Categories.displayName(keys.get(index));
+            String name = regions ? keys.get(index) : Categories.displayName(keys.get(index));
             String text = fit(chosen ? "✓ " + name : name, w - 4);
             int tx = x + Math.max(0, (w - mc.font.width(text)) / 2);
             int ty = y + Math.max(0, (LINE_H - mc.font.lineHeight) / 2);
@@ -546,6 +626,19 @@ public final class ContainerTagBar {
         if (locked) {
             holder.open = false;
         }
+        // 1.3.0 · issue #8 新增③：只有「不在任何仓库范围内 + 已开暂存」的箱子才提供「整理入仓」。
+        // 箱子进了仓库范围（或被搬走换了箱子）就立刻收回这两个按钮的状态，免得旧选择被误发出去。
+        boolean outside = !RegionCache.contains(dimension, pos.getX(), pos.getY(), pos.getZ());
+        holder.showFetch = staging && outside;
+        if (!holder.showFetch) {
+            holder.openRegion = false;
+            holder.fetchRegion = "";
+        } else {
+            List<String> known = fetchRegions();
+            if (!holder.fetchRegion.isEmpty() && !known.contains(holder.fetchRegion)) {
+                holder.fetchRegion = "";
+            }
+        }
         if (!pos.equals(holder.lastPos)) {
             holder.open = false;   // 换了箱子就收起下拉，免得展开态跟着玩家跑
         }
@@ -600,7 +693,7 @@ public final class ContainerTagBar {
         // TagBarLayout 是纯几何类（不 import Minecraft/Gson），所以由调用方把偏好与界面尺寸传进去；
         // auto + 界面尺寸 ≤ 1 时它会先试左侧（窗口逻辑宽度大 ⇒ JEI 面板占着箱子右边）。
         TagBarLayout.Plan plan = TagBarLayout.plan(screenW, screenH, guiX, guiY, guiW, guiH,
-                0, holder.extras.size(), ClientPrefs.dock(), mc.getWindow().getGuiScale());
+                0, holder.showFetch ? holder.extras.size() : 3, ClientPrefs.dock(), mc.getWindow().getGuiScale());
         if (plan.mode == TagBarLayout.Mode.HIDDEN) {
             hide(holder);
             return;
@@ -634,20 +727,26 @@ public final class ContainerTagBar {
                 "自动分类",
                 staging ? "暂存：开" : "暂存：关",
                 "清除标签",
+                "仓库：" + (holder.fetchRegion.isEmpty() ? "未选" : holder.fetchRegion) + (holder.openRegion ? " ▴" : " ▾"),
+                "整理入仓",
         };
         String[] extraTip = {
                 "按箱内物品重新算一次分类（自动档才会生效）",
                 staging ? "取消暂存：整理时不再只出不进" : "设为暂存箱：整理时假人只往外取，不往里放",
                 "清除这只箱子的标签，整理时回到默认启发式",
+                "选择要把这只箱子整理进哪个仓库（箱子不在任何仓库范围内、且开启暂存时出现）",
+                "让值守所选仓库的搬运工把这只箱子的东西搬进仓库（需先选仓库）",
         };
         for (int i = 0; i < holder.extras.size(); i++) {
             Button b = holder.extras.get(i);
             TagBarLayout.Box box = plan.box("e" + i);
-            if (box == null) {
+            if (box == null || (i >= 3 && !holder.showFetch)) {
                 b.visible = false;
                 continue;
             }
             b.visible = true;
+            // 「整理入仓」没选仓库时置灰：点不动，悬停提示会说明要先选仓库
+            b.active = i != 4 || !holder.fetchRegion.isEmpty();
             place(b, box);
             String text = fit(extraText[i], box.w - PAD);
             String tip = extraTip[i];
@@ -708,14 +807,24 @@ public final class ContainerTagBar {
 
     /** 下拉清单贴在「标签：…」按钮正下方（下面放不下就翻到上面），并夹在屏幕里 */
     private static void layoutList(Holder holder, int screenW, int screenH) {
-        // 类目数是动态的：每 tick 重算一次清单（含「当前键不在表里就补上」的兜底）
-        holder.cats.clear();
-        holder.cats.addAll(categoryKeys(currentCategory(holder)));
-        holder.catsAt = ClientSnapshot.receivedAt();
-        int total = holder.cats.size();
-        int btnBottom = holder.title.getY() + holder.title.getHeight();
+        // 清单来源：分类（默认）或「入仓仓库」（1.3.0 · issue #8 新增③），两张清单共用这块几何
+        List<String> keys;
+        if (holder.openRegion) {
+            keys = fetchRegions();
+        } else {
+            // 类目数是动态的：每 tick 重算一次清单（含「当前键不在表里就补上」的兜底）
+            holder.cats.clear();
+            holder.cats.addAll(categoryKeys(currentCategory(holder)));
+            holder.catsAt = ClientSnapshot.receivedAt();
+            keys = holder.cats;
+        }
+        int total = keys.size();
+        // 清单贴着「打开它的那个按钮」展开：分类清单贴标题，仓库清单贴第 4 个附加按钮
+        // （1.3.0 · issue #8：原来两张清单都贴标题，仓库下拉会从最上面一路盖住下面那排按钮）
+        AbstractWidget anchor = holder.openRegion && holder.extras.size() > 3 ? holder.extras.get(3) : holder.title;
+        int btnBottom = anchor.getY() + anchor.getHeight();
         int below = Math.max(0, screenH - btnBottom - 2);
-        int above = Math.max(0, holder.title.getY() - 2);
+        int above = Math.max(0, anchor.getY() - 2);
         boolean down = below >= above;
         int room = down ? below : above;
         int rows = Math.min(total, Math.max(1, (room - 4) / LINE_H));
@@ -729,16 +838,17 @@ public final class ContainerTagBar {
         int w = Math.max(holder.title.getWidth(), 96);
         Minecraft mc = Minecraft.getInstance();
         if (mc != null) {
-            for (String key : holder.cats) {
-                w = Math.max(w, mc.font.width(Categories.displayName(key)) + 16);
+            for (String key : keys) {
+                String shown = holder.openRegion ? key : Categories.displayName(key);
+                w = Math.max(w, mc.font.width(shown) + 16);
             }
         }
         w = Math.min(w, Math.max(1, screenW));
         int h = holder.rows * LINE_H + 4 + holder.footer;
-        int y = down ? btnBottom + 2 : Math.max(0, holder.title.getY() - 2 - h);
+        int y = down ? btnBottom + 2 : Math.max(0, anchor.getY() - 2 - h);
         holder.listW = w;
         holder.listH = h;
-        holder.listX = Math.max(0, Math.min(holder.title.getX(), Math.max(0, screenW - w)));
+        holder.listX = Math.max(0, Math.min(anchor.getX(), Math.max(0, screenW - w)));
         holder.listY = Math.max(0, Math.min(y, Math.max(0, screenH - h)));
         holder.scroll = Math.max(0, Math.min(holder.scroll, Math.max(0, total - holder.rows)));
     }

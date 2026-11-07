@@ -4,6 +4,7 @@ import com.ds.warehouse.WarehouseMod;
 import com.ds.warehouse.api.AddonSettings;
 import com.ds.warehouse.net.ViewQueryPayload;
 import com.ds.warehouse.util.Categories;
+import com.ds.warehouse.util.RegionColors;
 import com.google.gson.JsonObject;
 // 26.3：窗口/输入从 GLFW 换成 SDL3 —— 鼠标左键不再是 0（GLFW 编号），Esc 也不再是 256，
 // 改用下面这些具名常量（原版 AbstractWidget.isValidClickButton / InputWithModifiers.isEscape
@@ -275,6 +276,15 @@ public class WarehouseScreen extends Screen {
     private final int[] subOf = new int[5];
     /** 「设置」页：一列设置项（每行左边说明、右边按钮），空的表示这页没布局 */
     private final List<R> setRows = new java.util.ArrayList<>();
+
+    /** 「设置」页滚到第几行（行数超过一屏时用滚轮翻；下标对应 settingsRowCount() 的行序） */
+    private int setScroll;
+
+    /** 「设置」页第一行是第几条（layoutSettings 算好后给绘制/建控件用） */
+    private int setFirst;
+
+    /** 「设置」页一共有几条 */
+    private int setTotal;
     /** 附属模组页上一次的行文案指纹（见 {@link #addonSig(AddonSettings)}），和 tick 里的自动比对配对 */
     private String addonSig = "";
     /** 上一次自动比对是第几 tick（隔几个 tick 才比一次，别每 tick 都问附属模组要一遍行） */
@@ -406,6 +416,50 @@ public class WarehouseScreen extends Screen {
     /** 物品搜索框（按关键字过滤下面那个「这个仓库里有什么」列表） */
     private EditBox searchBox;
     private EditBox pickQueryBox;
+    /** 权限页顶部那句说明（1.3.0 · issue #8：把「添加玩家」这行到底干什么说清楚）。 */
+    private R permCaption;
+
+    /** 权限页「添加玩家」那一行：输入框 + 按钮（1.2.2 · issue #8 BUG2）。 */
+    private R permAddRow;
+    private R permAddLabel;
+    private R permNameRect;
+    private R permAddBtnRect;
+    private EditBox permNameBox;
+    /** 玩家名输入框的草稿：服务端快照刷新触发 rebuildWidgets() 时不丢玩家正在敲的字。 */
+    private String permNameDraft = "";
+    /** 「维护」页改仓库名的输入框（issue #7 新功能）。 */
+    private EditBox renameBox;
+    private String renameDraft = "";
+    /** 上一次给改名输入框预填的名字：选中项换了才重新预填，别覆盖玩家正在敲的字。 */
+    private String renameOwner = "";
+    /**
+     * 代表颜色面板（issue #8 新增①，1.3.0 起为完整取色盘）：预设色 + 旧/新对比 + H/S/V 三条滑条 +
+     * 最近用过的颜色 + 提交/重置/取消。
+     *
+     * <p>所有色块与滑条都是画出来的、不是控件：开/关面板时不用增删 widget，点击与拖动在
+     * {@link #mouseClicked} / {@link #mouseDragged} 里按矩形判定。
+     */
+    private boolean colorPickerOpen;
+    private R colorPanel;
+    private R[] colorSwatches = new R[0];
+    private R[] colorRecentRects = new R[0];
+    private R colorWheel;
+    private R colorHueBar;
+    private R colorSatBar;
+    private R colorValBar;
+    private R colorOldRect;
+    private R colorNewRect;
+    private R colorSubmit;
+    private R colorReset;
+    private R colorClose;
+    /** 取色盘当前选中的 HSV（H 0..359，S/V 0..100）与拖动中的滑条（0 无 / 1 H / 2 S / 3 V）。 */
+    private int pickHue = 0;
+    private int pickSat = 100;
+    private int pickVal = 100;
+    private R[] colorSliders = new R[0];
+    private int colorDrag = 0;
+    private int colorOldRgb = 0xFFFFFF;
+    private final java.util.ArrayDeque<Integer> colorRecent = new java.util.ArrayDeque<>();
     private Button dirBtn;
     private Button borderBtn;
     /** 当前玩家能不能改仓库设置（OP / 单人房主 / 权限等级 ≥2）。只影响界面显示，拦截在服务端。 */
@@ -710,6 +764,28 @@ public class WarehouseScreen extends Screen {
         rowsBox = null;
         footRow = null;
         notesBox = null;
+        permAddRow = null;
+        permAddLabel = null;
+        permNameRect = null;
+        permCaption = null;
+        permAddBtnRect = null;
+        permNameBox = null;
+        renameBox = null;
+        colorPickerOpen = false;
+        colorPanel = null;
+        colorSwatches = new R[0];
+        colorRecentRects = new R[0];
+        colorWheel = null;
+        colorHueBar = null;
+        colorSatBar = null;
+        colorValBar = null;
+        colorOldRect = null;
+        colorNewRect = null;
+        colorSubmit = null;
+        colorReset = null;
+        colorClose = null;
+        colorDrag = 0;
+        colorSliders = new R[0];
         boxRow = null;
         boxBox = null;
         itemCtlRow = null;
@@ -1023,9 +1099,23 @@ public class WarehouseScreen extends Screen {
         assignScroll = Math.max(0, Math.min(assignScroll, Math.max(0, count - assignRows)));
     }
 
-    /** 第 3 页「权限」：一个账号一行 / 底部两行说明（标题画在页面上方的小标题带里） */
+    /** 第 3 页「权限」：顶部「添加玩家」一行 / 中间一个账号一行 / 底部两行说明 */
     private void layoutPerm() {
         Flow f = new Flow(content);
+        // 1.2.2 · issue #8 BUG2：以前只能在命令里改「已有玩家」，新玩家进不了表；这里补一个输入框 + 添加按钮。
+        // 控件放顶部一行，行高沿用列表行高，空间不够时整行不建（不挤压下面的列表与说明）。
+        permCaption = f.takeTop(LINE_H, 2);
+        R addRow = f.takeTop(ROW_H + GAP, 0);
+        if (addRow != null && addRow.h() >= 16) {
+            permAddRow = addRow;
+            int btnW = Math.max(56, Math.min(84, addRow.w() / 6));
+            int labelW = Math.min(72, Math.max(0, addRow.w() - btnW - GAP * 2) / 4);
+            permAddLabel = new R(addRow.x(), addRow.y(), labelW, addRow.h());
+            int fieldX = addRow.x() + labelW + GAP;
+            int fieldW = Math.max(0, addRow.right() - btnW - GAP - fieldX);
+            permNameRect = fieldW >= 40 ? new R(fieldX, addRow.y(), fieldW, addRow.h()) : null;
+            permAddBtnRect = new R(addRow.right() - btnW, addRow.y(), btnW, addRow.h());
+        }
         notesBox = f.takeBottom(2 * LINE_H + 2, GAP);
         rowsBox = f.rest();
         rowH = fitRowH(rowsBox, Math.max(1, ClientSnapshot.accounts().size()), 22);
@@ -1099,6 +1189,32 @@ public class WarehouseScreen extends Screen {
                 if (w[guard % n] > minW) {
                     w[guard % n]--;
                     diff++;
+                }
+            }
+        }
+        // ④ 兜底：宽窗口已经保证塞得下；极窄时（语言很长 / 窗口拉到最小）按比例压到带内，
+        // 宁可页签窄一点，也不让最后一个页签越过面板边缘被裁掉一半。
+        if (n > 0) {
+            int totalW = gap * (n - 1);
+            for (int x : w) {
+                totalW += x;
+            }
+            if (totalW > avail && totalW > 0) {
+                int acc = 0;
+                for (int i = 0; i < n; i++) {
+                    w[i] = Math.max(8, (int) ((long) w[i] * Math.max(1, avail - gap * (n - 1)) / Math.max(1, totalW - gap * (n - 1))));
+                    acc += w[i];
+                }
+                int diff = Math.max(0, avail - gap * (n - 1)) - acc;
+                for (int guard = 0; diff > 0 && guard < n * 40; guard++) {
+                    w[guard % n]++;
+                    diff--;
+                }
+                for (int guard = 0; diff < 0 && guard < n * 40; guard++) {
+                    if (w[guard % n] > 8) {
+                        w[guard % n]--;
+                        diff++;
+                    }
                 }
             }
         }
@@ -1591,6 +1707,10 @@ public class WarehouseScreen extends Screen {
         }
         if (QueryClient.supported()) {
             QueryClient.open(itemRequest(itemPage));
+            // issue #7 BUG1：分类下拉的候选来自 KIND_OVERVIEW，但物品页以前从不请求它 ——
+            // 只有当玩家先进过「概览」子页时下拉里才有分类，否则只剩「全部分类」。
+            // 这里补一次请求；绘制阶段会按 400ms 缓存每帧刷新 catDd.entries，数据到了自动出现。
+            QueryClient.open(QueryClient.Request.of(ViewQueryPayload.KIND_OVERVIEW, queryRegion()));
         }
         if (itemCtlRow != null && !itemCtlRow.empty()) {
             int catW = Math.min(150, Math.max(76, itemCtlRow.w() * 46 / 100));
@@ -1759,6 +1879,75 @@ public class WarehouseScreen extends Screen {
                             + "搬运工亦不会操作它们。删除后可重新圈定范围再次创建。确定要删除吗？",
                             () -> run("warehouse region remove " + q(name), "已删除仓库 " + name))));
         }
+        // issue #7 新功能：改仓库名（左半 = 新名字输入框，右半 = 改名按钮；改的是左栏选中的那个仓库）
+        // 1.3.0 · issue #8：输入框预填**当前名字**，玩家在原名字上改，不用从头打一遍。
+        if (rows > 2) {
+            R ren = gridRowFromBottom(2);
+            R left = gridLeft(ren);
+            R right = gridRight(ren);
+            String current = selectedRegion();
+            if (current != null && !current.isEmpty()
+                    && (renameDraft.isEmpty() || renameDraft.equals(renameOwner))) {
+                renameDraft = current;
+            }
+            renameOwner = current == null ? "" : current;
+            renameBox = new EditBox(this.font, left.x(), left.y() + 1, left.w(), Math.max(8, left.h() - 2),
+                    Component.literal("仓库名"));
+            renameBox.setMaxLength(24);
+            renameBox.setValue(renameDraft);
+            rememberHint(renameBox, hintFor(left.w(), "当前名字（可中文）", "仓库名（可中文）", "仓库名", "名字", ""));
+            renameBox.setResponder(v -> renameDraft = v);
+            addRenderableWidget(renameBox);
+            btn("改名", right, b -> {
+                String next = clean(renameBox == null ? renameDraft : renameBox.getValue());
+                if (next.isEmpty()) {
+                    status = "请先在左边输入新仓库名，再点「改名」。";
+                    return;
+                }
+                withOneRegion(name -> {
+                    if (name.equalsIgnoreCase(next)) {
+                        status = "新名字和现在的名字一样，没有改名。";
+                        return;
+                    }
+                    ask("把仓库「" + name + "」改名为「" + next + "」",
+                            "只改名字：范围、箱子、索引都不动；值守这个仓库的搬运工会一起换成新名字。确定改名吗？",
+                            () -> {
+                                renameDraft = "";
+                                if (renameBox != null) {
+                                    renameBox.setValue("");
+                                }
+                                run("warehouse region rename " + q(name) + " " + q(next),
+                                        "已发送：把仓库「" + name + "」改名为「" + next + "」");
+                            });
+                });
+            });
+        }
+        // issue #8 新增①：仓库代表颜色（左半 = 当前颜色，点开面板；右半直接随机一个）
+        if (rows > 3) {
+            R col = gridRowFromBottom(3);
+            btn("代表颜色：■ " + RegionColors.hex(selectedColor()) + " ▾", gridLeft(col),
+                    b -> openColorPicker());
+            btn("随机颜色", gridRight(col), b -> withOneRegion(name -> {
+                int rgb = RegionColors.parse("random");
+                run("warehouse region color " + q(name) + " " + RegionColors.hex(rgb),
+                        "已把仓库「" + name + "」的代表颜色改成 " + RegionColors.hex(rgb) + "。");
+            }));
+        }
+    }
+
+    /** 当前选中仓库的代表颜色；没选中具体仓库时用默认白色。 */
+    private int selectedColor() {
+        RegionCache.Entry e = selectedEntry();
+        return e == null ? RegionColors.DEFAULT : e.color;
+    }
+
+    /** 当前选中仓库（没选中 / 「全部仓库」时返回 null）。 */
+    private RegionCache.Entry selectedEntry() {
+        List<RegionCache.Entry> list = RegionCache.list();
+        if (sel < 0 || list.isEmpty()) {
+            return null;
+        }
+        return list.get(Math.min(sel, list.size() - 1));
     }
 
     /** 「维护」页那个循环按钮上的字（按钮挪不动，只换文案） */
@@ -1858,6 +2047,16 @@ public class WarehouseScreen extends Screen {
         btn("取货", new R(orderRow.right() - orderW, orderRow.y(), orderW, orderRow.h()), b -> orderNow());
     }
 
+    /** 搬运工当前的自定义显示名（没设就是空串）；用于「设显示名」输入框预填。 */
+    private String botDisplay(String name) {
+        for (ClientSnapshot.Bot b : ClientSnapshot.bots()) {
+            if (b.name.equals(name)) {
+                return b.display == null ? "" : b.display;
+            }
+        }
+        return "";
+    }
+
     /** 一行搬运工里那 4 个按钮的矩形（右对齐；宽度按行宽等比，一定放得下） */
     private R[] botButtons(R row) {
         int gaps = GAP * 3;
@@ -1875,7 +2074,7 @@ public class WarehouseScreen extends Screen {
         int x = row.right() - Math.min(sum, row.w());
         R[] out = new R[4];
         for (int k = 0; k < 4; k++) {
-            out[k] = new R(x, row.y(), w[k], row.h());
+            out[k] = new R(x, row.y() + 1, w[k], Math.max(8, row.h() - 2));
             x += w[k] + GAP;
         }
         return out;
@@ -1898,7 +2097,7 @@ public class WarehouseScreen extends Screen {
         int x = row.right() - Math.min(sum, row.w());
         R[] out = new R[3];
         for (int k = 0; k < 3; k++) {
-            out[k] = new R(x, row.y(), w[k], row.h());
+            out[k] = new R(x, row.y() + 1, w[k], Math.max(8, row.h() - 2));
             x += w[k] + GAP;
         }
         return out;
@@ -1953,7 +2152,8 @@ public class WarehouseScreen extends Screen {
             // 只是重建控件，pickBot 没变 ⇒ 从 assignNameDraft 原样回填，玩家正在敲的字不会丢。
             if (!pickBot.equals(assignNameOwner)) {
                 assignNameOwner = pickBot;
-                assignNameDraft = "";
+                // 1.3.0 · issue #8：在**现有名字**上改，不是空框重打一遍
+                assignNameDraft = botDisplay(pickBot);
             }
             assignNameBox = new EditBox(this.font, assignNameRect.x(), assignNameRect.y() + 1,
                     assignNameRect.w(), Math.max(8, assignNameRect.h() - 2), Component.literal("显示名"));
@@ -2070,6 +2270,29 @@ public class WarehouseScreen extends Screen {
     private void initPerm() {
         if (!admin || sub == 1) {
             return;
+        }
+        // 「添加玩家」一行：输入框 + 按钮（只在空间够时建；控件只能在这里建，命中由控件自己管）
+        if (permAddRow != null && !permAddRow.empty() && permNameRect != null && permAddBtnRect != null) {
+            permNameBox = new EditBox(this.font, permNameRect.x(), permNameRect.y() + 1,
+                    permNameRect.w(), Math.max(8, permNameRect.h() - 2), Component.literal("玩家名"));
+            permNameBox.setMaxLength(32);
+            permNameBox.setValue(permNameDraft);
+            rememberHint(permNameBox, hintFor(permNameRect.w(), "玩家名（可中文）", "玩家名（可中文）",
+                    "玩家名", "名字", ""));
+            permNameBox.setResponder(v -> permNameDraft = v);
+            addRenderableWidget(permNameBox);
+            btn("添加", permAddBtnRect, b -> {
+                String text = clean(permNameBox == null ? permNameDraft : permNameBox.getValue());
+                if (text.isEmpty()) {
+                    status = "请先输入玩家名，再点「添加」。";
+                    return;
+                }
+                permNameDraft = "";
+                if (permNameBox != null) {
+                    permNameBox.setValue("");
+                }
+                run("warehouse user add " + q(text), "已发送：把「" + text + "」加进权限表");
+            });
         }
         List<ClientSnapshot.Account> accounts = ClientSnapshot.accounts();
         int visible = rowsVisible(rowsBox, rowH);
@@ -2565,6 +2788,7 @@ public class WarehouseScreen extends Screen {
         commitAddonText("");
         closeAddonChoices();
         boxScroll = 0;
+        setScroll = 0;
         rebuildWidgets();
     }
 
@@ -2586,6 +2810,7 @@ public class WarehouseScreen extends Screen {
         infoScroll = 0;
         pickScroll = 0;
         boxScroll = 0;
+        setScroll = 0;
         pickOpen = false;
         rebuildWidgets();
     }
@@ -2605,19 +2830,26 @@ public class WarehouseScreen extends Screen {
         }
         Flow f = new Flow(content);
         int n = settingsRowCount();
-        if (n > 0) {
-            // 行多的时候按可用高度均分（最低 ROW_H_MIN），把「底下那句说明」的高度先留出来：
-            // 14 行的附属页也要一屏看得下，而不是最后两行被悄悄吃掉。
-            int avail = Math.max(ROW_H_MIN, f.left() - LINE_H - GAP);
-            int pitch = Math.max(ROW_H_MIN, (avail - (n - 1) * SET_ROW_GAP) / n);
-            int h = Math.min(ROW_H, pitch);
-            for (int i = 0; i < n; i++) {
-                R r = f.takeTop(h, SET_ROW_GAP);
-                if (r == null) {
-                    break;
-                }
-                setRows.add(r);
+        setTotal = n;
+        setFirst = 0;
+        if (n <= 0) {
+            setScroll = 0;
+            return;
+        }
+        // 行高固定按 ROW_H（和其它页签、按钮一个尺寸）：以前行多时把行高压到 12~14 px，
+        // 附属模组那些按钮就比别处小一圈（用户反馈「语音取货界面的按钮太小」）。
+        // 一屏放不下就分页，用滚轮看后面的行。
+        int avail = Math.max(ROW_H, f.left() - LINE_H - GAP);
+        int fit = Math.max(1, (avail + SET_ROW_GAP) / (ROW_H + SET_ROW_GAP));
+        fit = Math.min(fit, n);
+        setScroll = Math.max(0, Math.min(setScroll, n - fit));
+        setFirst = setScroll;
+        for (int i = 0; i < fit; i++) {
+            R r = f.takeTop(ROW_H, SET_ROW_GAP);
+            if (r == null) {
+                break;
             }
+            setRows.add(r);
         }
     }
 
@@ -2794,13 +3026,16 @@ public class WarehouseScreen extends Screen {
             addonChoiceDds.clear();
             addonPageSig = pageSig;
         }
-        for (int i = 0; i < setRows.size() && i < rows.size(); i++) {
+        for (int i = 0; i < setRows.size(); i++) {
+            int idx = setFirst + i;
+            if (idx >= rows.size()) {
+                break;
+            }
             R box = setBtnRect(setRows.get(i));
             if (box.empty()) {
                 continue;
             }
-            AddonSettings.Row row = rows.get(i);
-            int idx = i;
+            AddonSettings.Row row = rows.get(idx);
             if (row.header()) {
                 continue;   // 分组标题行：只画字，不建任何控件
             }
@@ -3008,14 +3243,15 @@ public class WarehouseScreen extends Screen {
         List<String> notes = settingsNotes();
         for (int i = 0; i < setRows.size() && i < notes.size(); i++) {
             R row = setRows.get(i);
-            AddonSettings.Row setting = i < addonRowList.size() ? addonRowList.get(i) : null;
+            int si = setFirst + i;
+            AddonSettings.Row setting = si < addonRowList.size() ? addonRowList.get(si) : null;
             if (setting != null && setting.header()) {
                 // 分组小标题：一条浅底 + 标题字 + 底下一道分隔线，把「识别模型 / 模型下载 / AI 功能」
                 // 分开。以前十几行说明连成一片灰墙，认不出哪几行管同一件事。
                 fillIn(g, new R(row.x() - 2, row.y(), row.w() + 4, row.h()), Palette.rowBgDeep());
                 R title = new R(row.x(), row.y() + Math.max(0, (row.h() - LINE_H) / 2), row.w(), LINE_H);
                 if (!title.empty()) {
-                    textIn(g, title, notes.get(i), Palette.accentTextBright());
+                    textIn(g, title, notes.get(si), Palette.accentTextBright());
                 }
                 g.fill(row.x() - 2, row.bottom() - 1, row.right() + 2, row.bottom(), Palette.panelBorder());
                 continue;
@@ -3025,7 +3261,7 @@ public class WarehouseScreen extends Screen {
             if (!box.empty()) {
                 // 一行读成两段：标题正文色、说明灰一档 —— 一串「标题 —— 长说明」画成同色的话，
                 // 十几行连起来就是一面灰墙（面板里的设置项就是这么长起来的）。
-                String line = notes.get(i);
+                String line = notes.get(si);
                 int cut = line.indexOf(" —— ");
                 if (cut > 0) {
                     String label = line.substring(0, cut);
@@ -3048,8 +3284,12 @@ public class WarehouseScreen extends Screen {
         // INFO 行没有按钮，值直接画在按钮的位置上
         if (addon != null) {
             List<AddonSettings.Row> rows = addonRowList;
-            for (int i = 0; i < setRows.size() && i < rows.size(); i++) {
-                AddonSettings.Row row = rows.get(i);
+            for (int i = 0; i < setRows.size(); i++) {
+                int si = setFirst + i;
+                if (si >= rows.size()) {
+                    break;
+                }
+                AddonSettings.Row row = rows.get(si);
                 if (row.header() || row.kind() != AddonSettings.Kind.INFO) {
                     continue;
                 }
@@ -3065,6 +3305,9 @@ public class WarehouseScreen extends Screen {
             String hint = addon == null
                     ? "这些设置只影响你这台电脑上的面板：不进存档、不同步给服务器，也不改变任何仓库数据。"
                     : addon.summary() + "（值存在附属模组自己的配置文件里，和它自己的界面是同一份）";
+            if (setTotal > setRows.size()) {
+                hint = hint + "　滚轮翻页：" + (setFirst + 1) + "–" + (setFirst + setRows.size()) + " / " + setTotal;
+            }
             textIn(g, new R(content.x(), y, content.w(), LINE_H), hint, Palette.textFaint());
         }
         // 展开着的附属下拉不在这里画：这一趟（background）会被控件盖住，
@@ -3167,7 +3410,7 @@ public class WarehouseScreen extends Screen {
             case "概览" -> 1;          // 扫描仓库 + 显示边界 并排一行
             case "新建" -> 2;          // 底行 名字+新建仓库，上行 点1/点2
             case "扩建/缩小" -> 3;      // 扩建行 / 缩小+扩建到此处行 / 缩到此处+并进新范围行
-            case "维护" -> 2;
+            case "维护" -> 4;
             default -> 0;   // 物品（整块清单）、箱子（自带控件行）
         };
     }
@@ -3752,14 +3995,29 @@ public class WarehouseScreen extends Screen {
      * 再按自己的显示名做包含匹配）。所以只在客户端译名与服务端名字一致（同一语言）时填名字，
      * 否则填 id —— id 与服务端语言无关，{@code /warehouse order <id>} 一定解析得到。
      */
-    private static String orderFill(ClientSnapshot.Item it) {
+    private static String orderFill(ClientSnapshot.Item it, java.util.List<ClientSnapshot.Item> rows) {
         String base;
         String local = ClientNames.item(it.id);
-        // 1.2.1（I5-B1）：有组件变体的行直接用变体键 —— 它由 id + 组件算出，与语言无关，
-        // 服务端 resolveEx 第一步就认它，能保证取到的是**这一行那一件**（抗火药水不会拿成夜视药水）。
+        // 1.2.1（I5-B1）：有组件变体的行必须取到**这一行那一件**（抗火药水不会拿成夜视药水）。
+        // 优先填服务端下发的整行名（「迟缓药水 · 缓伐 IV 0:20」）—— 玩家看到的和输入框里的一致，
+        // 服务端 resolveEx ② 现在也认这个名字；名字缺失时才退回变体键（id@hash）。
         String variant = it.variant == null ? "" : it.variant.trim();
         if (!variant.isEmpty()) {
-            base = variant;
+            String shown = it.name == null ? "" : it.name.trim();
+            // 整行名必须能唯一定位到这一行：两个变体的注解恰好一样时（例如谜之炖菜只写「炖菜效果 1 条」）
+            // 名字解析会撞车，这时仍退回变体键，保证取到的是玩家点的那一件。
+            int same = 0;
+            if (!shown.isEmpty() && rows != null) {
+                for (ClientSnapshot.Item other : rows) {
+                    if (other.variant == null || other.variant.trim().isEmpty()) {
+                        continue;
+                    }
+                    if (shown.equals(other.name == null ? "" : other.name.trim())) {
+                        same++;
+                    }
+                }
+            }
+            base = same == 1 ? shown : variant;
         } else if (local != null && !local.isEmpty() && local.equals(it.name)) {
             base = it.name;
         } else {
@@ -3960,7 +4218,7 @@ public class WarehouseScreen extends Screen {
 
     /** 按像素宽度把一句话拆成若干行（逐字量宽，中英文都适用）。 */
     /** 中文排版禁则：这些标点不能出现在行首，折行时让它跟着上一个字一起挪到下一行 */
-    private static final String NO_LINE_START = "。，、；：！？）〕】》」』”’·%";
+    private static final String NO_LINE_START = "。，、；：！？）〕】》」』”’·%"; // copycheck:ignore 标点是数据不是文案
 
     private List<String> wrap(String text, int maxWidth) {
         List<String> out = new ArrayList<>();
@@ -4044,8 +4302,493 @@ public class WarehouseScreen extends Screen {
         }
     }
 
-    private int parseCount() {
-        try {
+    /**
+     * 画「代表颜色」取色盘（issue #8 新增①；1.3.0 起为完整取色盘）。
+     *
+     * <p>布局参照常见取色器：左边预设色列，中间色轮（角度=色相、半径=饱和度）+ 明度滑条，
+     * 下面「旧颜色 / 新颜色」对比与颜色值，右边最近用过的颜色；底部「提交 / 重置 / 取消」。
+     * 全部是画出来的，不是控件；点击与拖动在 {@link #mouseClicked} / {@link #mouseDragged} 里判定。
+     */
+    private void drawColorPicker(GuiGraphicsExtractor g, int mouseX, int mouseY) {
+        int w = Math.max(380, Math.min(this.width - MARGIN * 2, 620));
+        int h = Math.max(300, Math.min(this.height - MARGIN * 2, 460));
+        R panel = new R((this.width - w) / 2, (this.height - h) / 2, w, Math.max(1, h));
+        colorPanel = panel;
+
+        g.fill(0, 0, this.width, this.height, Palette.modalDim());
+        fillIn(g, panel, Palette.panelBg());
+        borderIn(g, panel, Palette.gold());
+
+        Flow f = new Flow(panel.inset(14, 12));
+        R title = f.takeTop(LINE_H, 6);
+        if (title != null) {
+            textIn(g, title, "仓库代表颜色", Palette.goldBright());
+            textIn(g, new R(title.x() + title.w() / 3, title.y(), title.w() * 2 / 3, title.h()),
+                    "拖动色轮或滑条，或点左侧预设", Palette.textLabel3());
+        }
+        R footer = f.takeBottom(26, 10);
+        R body = f.rest();
+        colorSubmit = null;
+        colorReset = null;
+        colorClose = null;
+        colorHueBar = null;
+        colorSatBar = null;
+        colorValBar = null;
+        colorOldRect = null;
+        colorNewRect = null;
+        colorWheel = null;
+        colorSwatches = new R[0];
+        colorRecentRects = new R[0];
+        colorSliders = new R[0];
+        if (body == null || footer == null) {
+            return;
+        }
+
+        // ---- 左：调色板（预设色，2 列，格子略大） ----
+        int presetW = Math.max(48, Math.min(76, body.w() / 7));
+        R presets = new R(body.x(), body.y(), presetW, body.h());
+        textIn(g, new R(presets.x(), presets.y(), presets.w(), LINE_H), "调色板", Palette.textLabel());
+        int cell = Math.max(12, Math.min(19, (presets.w() - 6) / 2));
+        int cellGap = 4;
+        int top = presets.y() + LINE_H + 6;
+        int previewNow = hsvToRgb(pickHue, pickSat, pickVal);
+        colorSwatches = new R[RegionColors.PRESETS.size()];
+        int si = 0;
+        for (Map.Entry<String, Integer> e : RegionColors.PRESETS.entrySet()) {
+            int cx = presets.x() + (si % 2) * (cell + cellGap);
+            int cy = top + (si / 2) * (cell + cellGap);
+            if (cy + cell > presets.bottom()) {
+                break;
+            }
+            R sw = new R(cx, cy, cell, cell);
+            colorSwatches[si] = sw;
+            fillIn(g, sw, 0xFF000000 | (e.getValue() & 0xFFFFFF));
+            boolean hover = sw.holds(mouseX, mouseY);
+            boolean chosen = (e.getValue() & 0xFFFFFF) == (previewNow & 0xFFFFFF);
+            borderIn(g, sw, chosen ? Palette.goldBright()
+                    : (hover ? Palette.buttonBorderPrimary() : Palette.buttonBorder()));
+            si++;
+        }
+        colorSwatches = java.util.Arrays.copyOf(colorSwatches, si);
+
+        // ---- 右：历史（最近用过的颜色，1 列） ----
+        int histW = Math.max(26, Math.min(36, body.w() / 14));
+        R history = new R(body.right() - histW, body.y(), histW, body.h());
+        textIn(g, new R(history.x(), history.y(), history.w(), LINE_H), "历史", Palette.textLabel());
+        int hcell = Math.max(11, Math.min(16, histW - 6));
+        int hy = history.y() + LINE_H + 6;
+        colorRecentRects = new R[Math.min(8, colorRecent.size())];
+        int ri = 0;
+        for (Integer rgb : colorRecent) {
+            if (ri >= colorRecentRects.length || hy + hcell > history.bottom()) {
+                break;
+            }
+            R sw = new R(history.x() + 2, hy, hcell, hcell);
+            colorRecentRects[ri++] = sw;
+            fillIn(g, sw, 0xFF000000 | (rgb & 0xFFFFFF));
+            borderIn(g, sw, sw.holds(mouseX, mouseY) ? Palette.buttonBorderPrimary() : Palette.buttonBorder());
+            hy += hcell + 4;
+        }
+        colorRecentRects = java.util.Arrays.copyOf(colorRecentRects, ri);
+
+        // ---- 中：色轮 + 明度条 + 数值 + H/S/V、R/G/B 六条滑条 + 旧/新对比 ----
+        int left = presets.right() + 12;
+        int right = history.x() - 12;
+        R main = new R(left, body.y(), Math.max(80, right - left), body.h());
+        int barW = 12;
+        int gap = 10;
+        int sliderRow = 18;
+        int slidersBlock = sliderRow * 6 + 4;
+        int swatchBlock = LINE_H + 24 + 8;
+        int textW = main.w() >= 300 ? 112 : 0;
+        int textBlock = textW > 0 ? textW + gap : 0;
+        int belowBlock = textW > 0 ? 0 : LINE_H * 2 + 6;
+        int wheelTop = main.y() + LINE_H + 4;
+        int byHeight = main.h() - LINE_H - 4 - slidersBlock - swatchBlock - belowBlock;
+        int byWidth = main.w() - barW - gap - textBlock;
+        int diameter = Math.max(56, Math.min(Math.min(byHeight, byWidth), 190));
+        R wheel = new R(main.x(), wheelTop, diameter, diameter);
+        colorWheel = wheel;
+        paintWheel(g, wheel, pickVal);
+        drawWheelKnob(g, wheel);
+        textIn(g, new R(wheel.x(), wheel.y() - LINE_H, wheel.w(), LINE_H), "色相 / 饱和度",
+                Palette.textLabel3());
+
+        // 明度条（竖放，与色轮等高）
+        R val = new R(wheel.right() + gap, wheel.y(), barW, wheel.h());
+        colorValBar = val;
+        for (int i = 0; i < 32; i++) {
+            int y0 = val.y() + val.h() * i / 32;
+            int y1 = val.y() + val.h() * (i + 1) / 32;
+            int rgb = hsvToRgb(pickHue, pickSat, 100 - i * 100 / 31);
+            g.fill(val.x(), y0, val.right(), Math.max(y0 + 1, y1), 0xFF000000 | rgb);
+        }
+        borderIn(g, val, Palette.buttonBorder());
+        int knobY = val.y() + (int) Math.round((100 - pickVal) / 100.0D * Math.max(0, val.h() - 3));
+        g.fill(val.x() - 1, knobY, val.right() + 1, knobY + 3, 0xFFFFFFFF);
+
+        int[] rgb = new int[]{(previewNow >> 16) & 0xFF, (previewNow >> 8) & 0xFF, previewNow & 0xFF};
+        int infoBottom;
+        if (textW > 0) {
+            int infoX = val.right() + gap;
+            int iy = wheel.y();
+            textIn(g, new R(infoX, iy, textW, LINE_H), "十六进制", Palette.textLabel3());
+            iy += LINE_H;
+            textIn(g, new R(infoX, iy, textW, LINE_H), RegionColors.hex(previewNow), Palette.textBody2());
+            iy += LINE_H + 2;
+            textIn(g, new R(infoX, iy, textW, LINE_H), "十进制", Palette.textLabel3());
+            iy += LINE_H;
+            textIn(g, new R(infoX, iy, textW, LINE_H), Integer.toString(previewNow & 0xFFFFFF), Palette.textBody2());
+            iy += LINE_H + 2;
+            textIn(g, new R(infoX, iy, textW, LINE_H), "RGB  " + rgb[0] + " / " + rgb[1] + " / " + rgb[2],
+                    Palette.textLabel3());
+            iy += LINE_H;
+            textIn(g, new R(infoX, iy, textW, LINE_H), "HSV  " + pickHue + " / " + pickSat + " / " + pickVal,
+                    Palette.textLabel3());
+            infoBottom = iy + LINE_H;
+        } else {
+            int iy = wheel.bottom() + 4;
+            textIn(g, new R(main.x(), iy, main.w(), LINE_H),
+                    RegionColors.hex(previewNow) + " · " + (previewNow & 0xFFFFFF), Palette.textBody2());
+            iy += LINE_H;
+            textIn(g, new R(main.x(), iy, main.w(), LINE_H),
+                    "R " + rgb[0] + " G " + rgb[1] + " B " + rgb[2]
+                            + "   H " + pickHue + " S " + pickSat + " V " + pickVal,
+                    Palette.textLabel3());
+            infoBottom = iy + LINE_H;
+        }
+
+        // 六条滑条：H / S / V / R / G / B（横向，带渐变轨道、白色把手与数值）
+        int sliderTop = Math.max(wheel.bottom(), infoBottom) + 8;
+        colorSliders = new R[6];
+        for (int i = 0; i < 6; i++) {
+            int y = sliderTop + i * sliderRow;
+            if (y + SLIDER_H > main.bottom() - swatchBlock) {
+                colorSliders = java.util.Arrays.copyOf(colorSliders, i);
+                break;
+            }
+            colorSliders[i] = drawColorSlider(g, main, y, i, mouseX, mouseY);
+        }
+
+        // 旧 / 新颜色对比（最后一行）
+        int swatchY = main.bottom() - 22;
+        int labelY = swatchY - LINE_H;
+        int sw = Math.max(30, (main.w() - 10) / 2);
+        colorOldRect = new R(main.x(), swatchY, sw, 22);
+        colorNewRect = new R(main.x() + sw + 10, swatchY, sw, 22);
+        textIn(g, new R(colorOldRect.x(), labelY, sw, LINE_H), "旧颜色", Palette.textLabel3());
+        textIn(g, new R(colorNewRect.x(), labelY, sw, LINE_H), "新颜色", Palette.textLabel3());
+        fillIn(g, colorOldRect, 0xFF000000 | (colorOldRgb & 0xFFFFFF));
+        borderIn(g, colorOldRect, Palette.buttonBorder());
+        fillIn(g, colorNewRect, 0xFF000000 | previewNow);
+        borderIn(g, colorNewRect, Palette.goldBright());
+
+        int bw = Math.min(96, Math.max(56, (footer.w() - GAP * 2) / 3));
+        colorClose = new R(footer.right() - bw, footer.y(), bw, footer.h());
+        colorReset = new R(colorClose.x() - GAP - bw, footer.y(), bw, footer.h());
+        colorSubmit = new R(colorReset.x() - GAP - bw, footer.y(), bw, footer.h());
+        confirmButton(g, colorSubmit, "提交", false, mouseX, mouseY);
+        confirmButton(g, colorReset, "重置", false, mouseX, mouseY);
+        confirmButton(g, colorClose, "取消", false, mouseX, mouseY);
+    }
+
+    /** 取色盘里一条横向滑条的高度。 */
+    private static final int SLIDER_H = 10;
+
+    /** 画一条取色滑条并返回它的轨道矩形；index 0..5 = H,S,V,R,G,B。 */
+    private R drawColorSlider(GuiGraphicsExtractor g, R main, int y, int index, int mouseX, int mouseY) {
+        int labelW = 18;
+        int valueW = 40;
+        R track = new R(main.x() + labelW, y + 2, Math.max(20, main.w() - labelW - valueW - 6), SLIDER_H);
+        int steps = 40;
+        for (int i = 0; i < steps; i++) {
+            int x0 = track.x() + track.w() * i / steps;
+            int x1 = track.x() + track.w() * (i + 1) / steps;
+            g.fill(x0, track.y(), Math.max(x0 + 1, x1), track.bottom(), 0xFF000000 | sliderColor(index, i * 100 / (steps - 1)));
+        }
+        borderIn(g, track, Palette.buttonBorder());
+        int value = sliderValue(index);
+        int max = index == 0 ? 359 : (index <= 2 ? 100 : 255);
+        int kx = track.x() + (int) Math.round(value / (double) max * Math.max(0, track.w() - 3));
+        g.fill(kx, track.y() - 2, kx + 3, track.bottom() + 2, 0xFFFFFFFF);
+        g.fill(kx + 1, track.y() - 1, kx + 2, track.bottom() + 1, 0xFF000000);
+        textIn(g, new R(main.x(), y, labelW, SLIDER_H + 4), sliderLabel(index), Palette.textLabel3());
+        textIn(g, new R(track.right() + 4, y, valueW - 4, SLIDER_H + 4), Integer.toString(value),
+                Palette.textBody2());
+        return track;
+    }
+
+    private static String sliderLabel(int index) {
+        return switch (index) {
+            case 0 -> "H";
+            case 1 -> "S";
+            case 2 -> "V";
+            case 3 -> "R";
+            case 4 -> "G";
+            default -> "B";
+        };
+    }
+
+    /** 滑条某一位置应显示的颜色（渐变轨道用）。 */
+    private int sliderColor(int index, int percent) {
+        int p = Math.max(0, Math.min(100, percent));
+        return switch (index) {
+            case 0 -> hsvToRgb(p * 359 / 100, 100, 100);
+            case 1 -> hsvToRgb(pickHue, p, 100);
+            case 2 -> hsvToRgb(pickHue, pickSat, p);
+            case 3 -> (p * 255 / 100) << 16;
+            case 4 -> (p * 255 / 100) << 8;
+            default -> p * 255 / 100;
+        };
+    }
+
+    /** 滑条当前值（H 0..359，S/V 0..100，R/G/B 0..255）。 */
+    private int sliderValue(int index) {
+        int rgb = hsvToRgb(pickHue, pickSat, pickVal);
+        return switch (index) {
+            case 0 -> pickHue;
+            case 1 -> pickSat;
+            case 2 -> pickVal;
+            case 3 -> (rgb >> 16) & 0xFF;
+            case 4 -> (rgb >> 8) & 0xFF;
+            default -> rgb & 0xFF;
+        };
+    }
+
+    /** 鼠标落在哪条滑条上（返回 0..5，未命中 -1）。 */
+    private int colorSliderAt(double mx, double my) {
+        for (int i = 0; i < colorSliders.length; i++) {
+            R track = colorSliders[i];
+            if (track != null && mx >= track.x() && mx <= track.right()
+                    && my >= track.y() - 4 && my <= track.bottom() + 4) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 把鼠标位置换算成滑条取值。 */
+    private void colorSliderTo(int index, double mx) {
+        if (index < 0 || index >= colorSliders.length || colorSliders[index] == null) {
+            return;
+        }
+        R track = colorSliders[index];
+        double frac = Math.max(0.0D, Math.min(1.0D, (mx - track.x()) / (double) Math.max(1, track.w() - 1)));
+        switch (index) {
+            case 0 -> pickHue = (int) Math.round(frac * 359);
+            case 1 -> pickSat = (int) Math.round(frac * 100);
+            case 2 -> pickVal = (int) Math.round(frac * 100);
+            default -> {
+                int rgb = hsvToRgb(pickHue, pickSat, pickVal);
+                int r = (rgb >> 16) & 0xFF;
+                int gg = (rgb >> 8) & 0xFF;
+                int b = rgb & 0xFF;
+                int v = (int) Math.round(frac * 255);
+                switch (index) {
+                    case 3 -> r = v;
+                    case 4 -> gg = v;
+                    default -> b = v;
+                }
+                int[] hsv = rgbToHsv((r << 16) | (gg << 8) | b);
+                pickHue = hsv[0];
+                pickSat = hsv[1];
+                pickVal = hsv[2];
+            }
+        }
+    }
+
+
+    /**
+     * 画色轮：角度 = 色相（0..359），半径 = 饱和度（0..100），明度固定 100。
+     * 按 96 段 × 16 环画小色块，够顺滑也不会每帧几千次调用。
+     */
+    private void paintWheel(GuiGraphicsExtractor g, R wheel, int value) {
+        // 1.3.0：优先用一次性烘焙的贴图（每像素按极坐标算色相/饱和度，边缘抗锯齿），
+        // 渐变连续、没有方块台阶；贴图不可用时退回下面的方块画法。
+        net.minecraft.resources.Identifier texture = ColorWheelTexture.id();
+        if (texture != null) {
+            g.blit(texture, wheel.x(), wheel.y(), wheel.x() + wheel.w(), wheel.y() + wheel.h(), 0.0F, 1.0F, 0.0F, 1.0F);
+            return;
+        }
+        int segments = 96;
+        int rings = 16;
+        double radius = wheel.w() / 2.0D;
+        double cx = wheel.x() + radius;
+        double cy = wheel.y() + radius;
+        for (int ring = 0; ring < rings; ring++) {
+            double r0 = radius * ring / rings;
+            double r1 = radius * (ring + 1) / rings;
+            int sat = (ring + 1) * 100 / rings;
+            for (int seg = 0; seg < segments; seg++) {
+                int hue = seg * 360 / segments;
+                double a0 = Math.toRadians(seg * 360.0D / segments - 0.5D);
+                double a1 = Math.toRadians((seg + 1) * 360.0D / segments + 0.5D);
+                int rgb = hsvToRgb(hue, sat, value);
+                // 用两段圆弧的中点画一个大约覆盖这一段的小方块
+                double mid = (a0 + a1) / 2.0D;
+                double rr = (r0 + r1) / 2.0D;
+                int px = (int) Math.round(cx + Math.cos(mid) * rr);
+                int py = (int) Math.round(cy + Math.sin(mid) * rr);
+                int size = Math.max(2, (int) Math.ceil(r1 - r0) + 1);
+                g.fill(px - size / 2, py - size / 2, px + size / 2 + 1, py + size / 2 + 1, 0xFF000000 | rgb);
+            }
+        }
+    }
+
+    /** 色轮上的当前选择点：一个小小的白色圆点（用 3×3 方块表示）。 */
+    private void drawWheelKnob(GuiGraphicsExtractor g, R wheel) {
+        double radius = wheel.w() / 2.0D;
+        double cx = wheel.x() + radius;
+        double cy = wheel.y() + radius;
+        double angle = Math.toRadians(pickHue);
+        double rr = radius * pickSat / 100.0D;
+        int px = (int) Math.round(cx + Math.cos(angle) * rr);
+        int py = (int) Math.round(cy + Math.sin(angle) * rr);
+        g.fill(px - 2, py - 2, px + 3, py + 3, 0xFFFFFFFF);
+        g.fill(px - 1, py - 1, px + 2, py + 2, 0xFF000000);
+    }
+
+    /** 色轮上的点 → 色相 / 饱和度；返回 false 表示点在圆外（不生效）。 */
+    private boolean colorWheelTo(double mx, double my) {
+        if (colorWheel == null) {
+            return false;
+        }
+        double radius = colorWheel.w() / 2.0D;
+        double dx = mx - (colorWheel.x() + radius);
+        double dy = my - (colorWheel.y() + radius);
+        double dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > radius) {
+            return false;
+        }
+        int hue = (int) Math.round(Math.toDegrees(Math.atan2(dy, dx)));
+        pickHue = Math.floorMod(hue, 360);
+        pickSat = (int) Math.round(Math.min(1.0D, dist / radius) * 100);
+        return true;
+    }
+
+    /** 鼠标现在落在哪条滑条上（明度条 = 3；其余 0）。 */
+    private int colorBarAt(double mx, double my) {
+        if (colorValBar != null && colorValBar.holds(mx, my)) {
+            return 3;
+        }
+        return 0;
+    }
+
+    /** 把鼠标位置换算成滑条的取值（拖动时每一步都调一次）。 */
+    private void colorDragTo(double mx, double my) {
+        if (colorDrag >= 10) {
+            colorSliderTo(colorDrag - 10, mx);
+            return;
+        }
+        if (colorDrag == 4) {
+            colorWheelTo(mx, my);
+            return;
+        }
+        if (colorDrag != 3) {
+            return;
+        }
+        R bar = colorValBar;
+        if (bar == null || bar.h() <= 1) {
+            return;
+        }
+        double frac = Math.max(0.0D, Math.min(1.0D, (my - bar.y()) / (double) bar.h()));
+        pickVal = (int) Math.round((1.0D - frac) * 100);
+    }
+
+    /** 打开取色盘：以当前仓库颜色为起点（旧颜色=当前色，新颜色也先等于它）。 */
+    private void openColorPicker() {
+        int rgb = selectedColor();
+        colorOldRgb = rgb;
+        int[] hsv = rgbToHsv(rgb);
+        pickHue = hsv[0];
+        pickSat = hsv[1];
+        pickVal = hsv[2];
+        colorDrag = 0;
+        colorPickerOpen = true;
+    }
+
+    /** RGB → HSV（H 0..359，S/V 0..100）；纯灰没有色相，按 0 处理。 */
+    private static int[] rgbToHsv(int rgb) {
+        int r = (rgb >> 16) & 0xFF;
+        int g = (rgb >> 8) & 0xFF;
+        int b = rgb & 0xFF;
+        int max = Math.max(r, Math.max(g, b));
+        int min = Math.min(r, Math.min(g, b));
+        int delta = max - min;
+        int hue = 0;
+        if (delta > 0) {
+            double h;
+            if (max == r) {
+                h = 60.0D * ((g - b) / (double) delta);
+            } else if (max == g) {
+                h = 60.0D * (2.0D + (b - r) / (double) delta);
+            } else {
+                h = 60.0D * (4.0D + (r - g) / (double) delta);
+            }
+            hue = (int) Math.round((h + 360.0D) % 360.0D);
+        }
+        int sat = max == 0 ? 0 : (int) Math.round(delta * 100.0D / max);
+        int val = (int) Math.round(max * 100.0D / 255.0D);
+        return new int[]{hue, sat, val};
+    }
+
+    /** HSV（H 0..359，S/V 0..100）→ 0xRRGGBB。 */
+    private static int hsvToRgb(int hue, int sat, int val) {
+        int h = Math.floorMod(hue, 360);
+        double s = Math.max(0, Math.min(100, sat)) / 100.0D;
+        double v = Math.max(0, Math.min(100, val)) / 100.0D;
+        double c = v * s;
+        double x = c * (1.0D - Math.abs(((h / 60.0D) % 2.0D) - 1.0D));
+        double m = v - c;
+        double r;
+        double g;
+        double b;
+        if (h < 60) {
+            r = c;
+            g = x;
+            b = 0;
+        } else if (h < 120) {
+            r = x;
+            g = c;
+            b = 0;
+        } else if (h < 180) {
+            r = 0;
+            g = c;
+            b = x;
+        } else if (h < 240) {
+            r = 0;
+            g = x;
+            b = c;
+        } else if (h < 300) {
+            r = x;
+            g = 0;
+            b = c;
+        } else {
+            r = c;
+            g = 0;
+            b = x;
+        }
+        int ri = (int) Math.round((r + m) * 255.0D);
+        int gi = (int) Math.round((g + m) * 255.0D);
+        int bi = (int) Math.round((b + m) * 255.0D);
+        return ((ri & 0xFF) << 16) | ((gi & 0xFF) << 8) | (bi & 0xFF);
+    }
+
+    /** 把选中仓库的代表颜色改成 {@code rgb}（走指令，服务端落盘并推新快照）。 */
+    private void applyColor(int rgb) {
+        String hex = RegionColors.hex(rgb);
+        colorRecent.remove(rgb);
+        colorRecent.addFirst(rgb);
+        while (colorRecent.size() > 8) {
+            colorRecent.removeLast();
+        }
+        withOneRegion(name -> run("warehouse region color " + q(name) + " " + hex,
+                "已把仓库「" + name + "」的代表颜色改成 " + hex + "。"));
+        colorPickerOpen = false;
+        colorDrag = 0;
+    }
+
+    private int parseCount() {        try {
             int value = Integer.parseInt(countText.trim());
             if (value < 1) {
                 return 1;
@@ -4694,10 +5437,14 @@ public class WarehouseScreen extends Screen {
             borderIn(g, r, on ? Palette.accentBorder() : Palette.listBorder());
             String label = names[i];
             // 页签上的计数按**页名**挂：普通玩家的下标 2 是「设置」，不能给它挂搬运工数量
+            String counted = null;
             if ("搬运工".equals(names[i])) {
-                label = label + " " + ClientSnapshot.bots().size();
+                counted = label + " " + ClientSnapshot.bots().size();
             } else if ("权限".equals(names[i])) {
-                label = label + " " + ClientSnapshot.accounts().size();
+                counted = label + " " + ClientSnapshot.accounts().size();
+            }
+            if (counted != null && this.font.width(counted) + 6 <= r.w()) {
+                label = counted;
             }
             textMid(g, new R(r.x() + 3, r.y(), Math.max(0, r.w() - 6), r.h()), label,
                     on ? Palette.textBody4() : Palette.textDim());
@@ -4765,15 +5512,24 @@ public class WarehouseScreen extends Screen {
                     } else if (hover) {
                         fillIn(gg, row, Palette.rowBg());
                     }
+                    // 1.3.0 · issue #8 新增①：行首画一个仓库代表色的小方块（「全部仓库」不画）
+                    if (entry != null) {
+                        int size = Math.max(5, Math.min(8, row.h() - 8));
+                        R dot = new R(row.x() + 4, row.y() + (row.h() - size) / 2, size, size);
+                        fillIn(gg, dot, 0xFF000000 | entry.color);
+                        borderIn(gg, dot, Palette.buttonBorderPrimary());
+                    }
                     // 名字一行 + 详情最多两行：整块在行里垂直居中，每行各自水平居中（都不会越出行框）
-                    int metaW = Math.max(0, row.w() - 12);
+                    int swatch = entry == null ? 0 : 10;
+                    int metaW = Math.max(0, row.w() - 12 - swatch);
                     List<String> meta = all ? allRegionsMeta(total - 1) : metaLines(entry, metaW);
                     int blockH = LINE_H * (1 + meta.size());
                     int top = row.y() + Math.max(2, (row.h() - blockH) / 2);
-                    textCenter(gg, new R(row.x() + 6, top, metaW, LINE_H),
+                    int textX = row.x() + 6 + swatch;
+                    textCenter(gg, new R(textX, top, metaW, LINE_H),
                             all ? "全部仓库" : entry.name, selected ? Palette.textTitle() : Palette.textBody());
                     for (int k = 0; k < meta.size(); k++) {
-                        textCenter(gg, new R(row.x() + 6, top + (k + 1) * LINE_H, metaW, LINE_H),
+                        textCenter(gg, new R(textX, top + (k + 1) * LINE_H, metaW, LINE_H),
                                 meta.get(k), selected ? Palette.textBody3() : Palette.textFaint2());
                     }
                 }
@@ -6194,12 +6950,19 @@ public class WarehouseScreen extends Screen {
         }
         auditPrev = null;
         auditNext = null;
+        // 顶部一句说明 + 「添加玩家：」标签（输入框与按钮是控件，标签自己画）
+        if (permCaption != null && !permCaption.empty()) {
+            textIn(g, permCaption, "新玩家：输入名字后点「添加」；已有玩家：直接改下面的开关。", Palette.textMuted());
+        }
+        if (permAddLabel != null && !permAddLabel.empty()) {
+            textIn(g, permAddLabel, "添加玩家：", Palette.textLabel());
+        }
         List<ClientSnapshot.Account> accounts = ClientSnapshot.accounts();
         // 小标题带那句由 captionText() 画（会按宽度退化），这里不重复画
         if (rowsBox != null && !rowsBox.empty() && rowH > 0) {
             if (accounts.isEmpty()) {
                 textIn(g, new R(rowsBox.x(), rowsBox.y() + 4, rowsBox.w(), LINE_H),
-                        "还没有玩家有权限。用 /warehouse user perm <玩家名> take|bot|tidy on 添加，或用 /warehouse user migrate 从旧网页账号库导入。", Palette.textLabel2());
+                        "还没有玩家有权限。在上方输入玩家名点「添加」，或用 /warehouse user add <玩家名>。", Palette.textLabel2());
             } else {
                 int visible = rowsVisible(rowsBox, rowH);
                 int first = rowWindow(g, accounts.size());
@@ -6223,7 +6986,7 @@ public class WarehouseScreen extends Screen {
             int bottom = notesBox.bottom();
             for (String line : List.of(
                     "「取货」= 可用面板取货；「假人」= 可指挥搬运工；「整理」= 可整理仓库并刷新索引。",
-                    "操作日志在「审计」子页。")) {
+                    "管理员（OP）不用登记也能操作。操作日志在「审计」子页。")) {
                 int color = y == notesBox.y() ? Palette.textLabel() : Palette.textMuted();
                 for (String part : wrap(line, notesBox.w())) {
                     if (y + LINE_H > bottom) {
@@ -6373,6 +7136,9 @@ public class WarehouseScreen extends Screen {
                 dd.draw(g, mouseX, mouseY);
             }
         }
+        if (colorPickerOpen) {
+            drawColorPicker(g, mouseX, mouseY);
+        }
         if (pending != null) {
             drawConfirm(g, mouseX, mouseY);
         }
@@ -6444,7 +7210,67 @@ public class WarehouseScreen extends Screen {
             }
             return true;
         }
-        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && pickDd != null && pickDd.open && pickDd.click(ev.x(), ev.y())) {
+
+        // 取色盘开着：只认它自己的控件，点别处吃掉这次点击
+        if (colorPickerOpen) {
+            if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT) {
+                if (colorClose != null && colorClose.holds(ev.x(), ev.y())) {
+                    colorPickerOpen = false;
+                    colorDrag = 0;
+                    return true;
+                }
+                if (colorReset != null && colorReset.holds(ev.x(), ev.y())) {
+                    openColorPicker();
+                    return true;
+                }
+                if (colorSubmit != null && colorSubmit.holds(ev.x(), ev.y())) {
+                    applyColor(hsvToRgb(pickHue, pickSat, pickVal));
+                    return true;
+                }
+                int slider = colorSliderAt(ev.x(), ev.y());
+                if (slider >= 0) {
+                    colorDrag = 10 + slider;
+                    colorSliderTo(slider, ev.x());
+                    return true;
+                }
+                if (colorWheel != null && colorWheel.holds(ev.x(), ev.y())) {
+                    colorDrag = 4;
+                    colorWheelTo(ev.x(), ev.y());
+                    return true;
+                }
+                int bar = colorBarAt(ev.x(), ev.y());
+                if (bar != 0) {
+                    colorDrag = bar;
+                    colorDragTo(ev.x(), ev.y());
+                    return true;
+                }
+                int index = 0;
+                for (Map.Entry<String, Integer> e : RegionColors.PRESETS.entrySet()) {
+                    R sw = index < colorSwatches.length ? colorSwatches[index] : null;
+                    if (sw != null && sw.holds(ev.x(), ev.y())) {
+                        int[] hsv = rgbToHsv(e.getValue());
+                        pickHue = hsv[0];
+                        pickSat = hsv[1];
+                        pickVal = hsv[2];
+                        return true;
+                    }
+                    index++;
+                }
+                int ri = 0;
+                for (Integer rgb : colorRecent) {
+                    R sw = ri < colorRecentRects.length ? colorRecentRects[ri] : null;
+                    if (sw != null && sw.holds(ev.x(), ev.y())) {
+                        int[] hsv = rgbToHsv(rgb);
+                        pickHue = hsv[0];
+                        pickSat = hsv[1];
+                        pickVal = hsv[2];
+                        return true;
+                    }
+                    ri++;
+                }
+            }
+            return true;
+        }        if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && pickDd != null && pickDd.open && pickDd.click(ev.x(), ev.y())) {
             // 「取货」页的仓库下拉展开着：点条目就换范围，点别处就收起来（两种情况都吃掉这次点击）
             return true;
         }
@@ -6648,7 +7474,7 @@ public class WarehouseScreen extends Screen {
                 if (line.holds(ev.x(), ev.y())) {
                     ClientSnapshot.Item it = items.get(idx);
                     // 填什么由 orderFill 决定：同一语言就填名字（好看），服务端语言不同就填 id（一定解析得到）
-                    String fill = orderFill(it);
+                    String fill = orderFill(it, items);
                     orderText = fill;
                     if (orderBox != null) {
                         orderBox.setValue(fill);
@@ -6705,6 +7531,18 @@ public class WarehouseScreen extends Screen {
             if (assignList != null && assignList.holds(x, y)) {
                 int max = Math.max(0, RegionCache.list().size() - assignRows);
                 assignScroll = Math.max(0, Math.min(assignScroll + step, max));
+            }
+            return true;
+        }
+        if ("设置".equals(tabName())) {
+            // 「设置」页：行数超过一屏时用滚轮翻页（行高固定 ROW_H，不再为了塞下而压小按钮）
+            if (setTotal > setRows.size()) {
+                int max = Math.max(0, setTotal - setRows.size());
+                int next = Math.max(0, Math.min(setScroll + step * 2, max));
+                if (next != setScroll) {
+                    setScroll = next;
+                    rebuildWidgets();
+                }
             }
             return true;
         }
@@ -6877,6 +7715,10 @@ public class WarehouseScreen extends Screen {
 
     @Override
     public boolean mouseDragged(MouseButtonEvent ev, double dragX, double dragY) {
+        if (colorPickerOpen && colorDrag != 0) {
+            colorDragTo(ev.x(), ev.y());
+            return true;
+        }
         if (ev.button() == InputConstants.MOUSE_BUTTON_LEFT && dragScrollBar(ev.y())) {
             return true;
         }
@@ -6891,6 +7733,9 @@ public class WarehouseScreen extends Screen {
      */
     @Override
     public void mouseMoved(double x, double y) {
+        if (colorPickerOpen && colorDrag != 0) {
+            colorDragTo(x, y);
+        }
         // 正在拖就继续拖（26.2 上 mouseDragged 与 mouseMoved 哪条先到不一定）；
         // 两条都不认领且左键也没按着时，才清掉拖动状态，避免滑块「黏」在鼠标上
         if (!dragScrollBar(y) && !leftDown()) {
@@ -6908,6 +7753,7 @@ public class WarehouseScreen extends Screen {
     @Override
     public boolean mouseReleased(MouseButtonEvent ev) {
         releaseScrollBars();
+        colorDrag = 0;
         return super.mouseReleased(ev);
     }
 

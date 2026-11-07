@@ -200,7 +200,7 @@ public final class Body {
             hold(level.getServer(), name, null);
         }
         DEAD.add(name);
-        WarehouseMod.LOGGER.warn("[warehouse-keeper] 假人 {} 被别的来源弄死了，副手已清空", name);
+        WarehouseMod.LOGGER.warn("[warehouse-keeper] 假人 {} 被其他来源击杀，副手物品已清空", name);
     }
 
     /** 取出一条「假人死了」的记录（没有就返回 null） */

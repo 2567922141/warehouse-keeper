@@ -44,25 +44,36 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 ![箱子内部界面（更多箱子）](./photo/image-4.png)
 
 
+## 4.运行环境及相关组件
 
+### A.运行环境（测试时所使用的环境）
 
-## 4.运行环境
-
-| 组件 | 版本要求 |
+| 环境 | 版本 |
 | --- | --- |
-|warehouse-keeper| 1.3.0 |
+| 系统 | windows 11 x64 26H2 Workstation Pro（专业工作站版） |
 | Minecraft | 26.3 |
 | Fabric Loader | 0.19.5（0.19.3 或更高） |
 | Fabric API | 0.161.0+26.3（或兼容版本） |
-| Java | 25 或更高 |
+| Java(JDK) | 25 或更高 |
+
+> **注：**
+> 
+> 1. 其他运行环境自行测试。
+
+### B.相关组件信息
+
+| 相关组件 | 版本要求 |
+| --- | --- |
+| warehouse-keeper| 1.3.0 |
 | fabric-carpet | 已内置（Carpet 26.3，MIT），无需另装 |
-|warehouse-keeper-voice | 已内置 0.5.0，默认关闭，可在设置里开启 |
+| warehouse-keeper-voice | 已内置 0.5.0，默认关闭，可在设置里开启 |
 
 > **注：**
 >
-> 1. 想要下载适用于 Minecraft 26.2 的版本请选择 v1.1.3 或更早期版本：[查看 26.2 分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)
+> 1. 想要下载适用于 Minecraft 26.2 的版本请选择 v1.1.3 或更早期版本：[查看 26.2 分支页面](https://github.com/2567922141/warehouse-keeper/tree/26.2)。
 > 2. [fabric-carpet](https://github.com/gnembon/fabric-carpet)：已内置（Jar-in-Jar，MIT），无需另装；它的许可与来源见 `THIRD-PARTY-NOTICES.md`。
 > 3. [warehouse-keeper-voice](https://github.com/2567922141/warehouse-keeper-voice)：已内置 0.5.0，默认关闭；需要语音取货时在 设置 → 语音取货 打开「启用语音取货」。
+> 4. 更多相关组件及其信息请看 ==> 14.第三方组件与声明。
 
 ## 5.安装
 
@@ -184,7 +195,7 @@ src/main/java/com/ds/warehouse/
 ├── mixin/                 客户端渲染替换（假人头顶名牌按显示名显示）
 └── util/                  权限、名称表、审计与通用工具
 src/main/resources/        fabric.mod.json 与语言文件
-history/                   版本更新记录（update-history.md，README 只保留跳转链接）
+history/                   版本更新记录（update-history.md）
 release-notes/             各版本的发行说明
 photo/                     README 与发行说明里引用的界面截图
 THIRD-PARTY-NOTICES.md     内置第三方组件（Carpet）的许可与来源

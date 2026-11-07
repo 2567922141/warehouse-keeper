@@ -187,7 +187,6 @@ src/main/resources/        fabric.mod.json 与语言文件
 history/                   版本更新记录（update-history.md，README 只保留跳转链接）
 release-notes/             各版本的发行说明
 photo/                     README 与发行说明里引用的界面截图
-CHANGELOG.md               开发期的变更记录（[Unreleased] 段）
 THIRD-PARTY-NOTICES.md     内置第三方组件（Carpet）的许可与来源
 dist/                      本地打包出来的模组 jar（**不入库**，随 GitHub Releases 发布）
 ```

@@ -8,7 +8,7 @@
 - 用途：搬运工假人（`/player <名字> spawn at <坐标>`）。本模组**只通过指令**与它交互，
   不引用它的任何类、不加它的 Mixin，因此它只是随包附带的可选运行时组件。
 - 版本：`26.3`（对应上游 `fabric-carpet-26.3+v260915.jar`）
-- 来源：https://modrinth.com/mod/carpet （https://github.com/gnembon/fabric-carpet）
+- 来源：[Modrinth](https://modrinth.com/mod/carpet) · [GitHub](https://github.com/gnembon/fabric-carpet)
 - 许可：MIT License（全文见下；jar 内同时保留上游的 `LICENSE_fabric-carpet`）
 
 ```

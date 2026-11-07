@@ -215,13 +215,13 @@ dist/                      本地打包出来的模组 jar（**不入库**，随
 
 | 组件 | 版本 | 许可 | 与本项目的关系 | 来源 |
 | --- | --- | --- | --- | --- |
-| fabric-carpet（Carpet Mod） | 26.3 | MIT（© 2020 gnembon） | 随主包以 Jar-in-Jar 内置；搬运工**只通过 `/player` 指令**使用它，不引用其类、不加其 Mixin | [GitHub](https://github.com/gnembon/fabric-carpet) · [Modrinth](https://modrinth.com/mod/carpet) |
-| Fabric Loader | 0.19.5（0.19.3+） | Apache-2.0 | 运行期依赖，不打包 | [GitHub](https://github.com/FabricMC/fabric-loader) |
-| Fabric API | 0.161.0+26.3 | Apache-2.0 | 运行期依赖，不打包 | [GitHub](https://github.com/FabricMC/fabric-api) |
-| Minecraft（Mojang） | 26.3 | Mojang EULA（专有） | 运行环境，不打包 | [EULA](https://www.minecraft.net/eula) |
-| warehouse-keeper-voice | 0.5.0 | MIT（© 2026 2567922141） | 本项目的附属模组（同一作者），随主包内置、**默认关闭** | [GitHub](https://github.com/2567922141/warehouse-keeper-voice) |
-| sherpa-onnx（JVM 绑定） | 1.13.8 | Apache-2.0 | 语音包内置的离线识别引擎，随语音代码一起打进主包 | [GitHub](https://github.com/k2-fsa/sherpa-onnx) |
-| onnxruntime | 随 sherpa-onnx | MIT（© Microsoft） | 语音包内置的推理运行时（含 Windows 原生 DLL） | [GitHub](https://github.com/microsoft/onnxruntime) |
+| [fabric-carpet](https://github.com/gnembon/fabric-carpet)（Carpet Mod） | 26.3 | MIT（© 2020 gnembon） | 随主包以 Jar-in-Jar 内置；搬运工**只通过 `/player` 指令**使用它，不引用其类、不加其 Mixin | [GitHub](https://github.com/gnembon/fabric-carpet) · [Modrinth](https://modrinth.com/mod/carpet) |
+| [Fabric Loader](https://github.com/FabricMC/fabric-loader) | 0.19.5（0.19.3+） | Apache-2.0 | 运行期依赖，不打包 | [GitHub](https://github.com/FabricMC/fabric-loader) |
+| [Fabric API](https://github.com/FabricMC/fabric-api) | 0.161.0+26.3 | Apache-2.0 | 运行期依赖，不打包 | [GitHub](https://github.com/FabricMC/fabric-api) |
+| [Minecraft](https://www.minecraft.net/)（Mojang） | 26.3 | Mojang EULA（专有） | 运行环境，不打包 | [EULA](https://www.minecraft.net/eula) |
+| [warehouse-keeper-voice](https://github.com/2567922141/warehouse-keeper-voice) | 0.5.0 | MIT（© 2026 2567922141） | 本项目的附属模组（同一作者），随主包内置、**默认关闭** | [GitHub](https://github.com/2567922141/warehouse-keeper-voice) |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)（JVM 绑定） | 1.13.8 | Apache-2.0 | 语音包内置的离线识别引擎，随语音代码一起打进主包 | [GitHub](https://github.com/k2-fsa/sherpa-onnx) |
+| [onnxruntime](https://github.com/microsoft/onnxruntime) | 随 sherpa-onnx | MIT（© Microsoft） | 语音包内置的推理运行时（含 Windows 原生 DLL） | [GitHub](https://github.com/microsoft/onnxruntime) |
 
 补充说明：
 

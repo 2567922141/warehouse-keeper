@@ -60,6 +60,15 @@ public final class Tasks {
      * 回一句说明，{@link #kindName} 也不再给它名字。等命令层的节点删掉后这个常量可以一起删。
      */
     public static final int SWEEP = 1;
+    /**
+     * 暂存箱入仓（1.3.0 · issue #8 新增③）。
+     *
+     * <p>箱子**不在任何仓库范围内**、但开了「暂存」标签时，玩家可以在箱子标签栏里选一个仓库，
+     * 让值守那个仓库的搬运工把这只箱子里的东西搬进仓库。执行方式与整理完全一样（复用
+     * {@link #planIn}：暂存箱跳过箱内合并/排序，只做「放错箱子的搬回它的家」），区别只是
+     * 来源箱不是从仓库索引里取的，而是任务自带的坐标。
+     */
+    public static final int FETCH = 2;
     /** 整理：一个任务最多跑多久（批次 1 · B2） */
     private static final long JOB_NANOS = 10L * 60L * 1_000_000_000L;
     /** 整理：一个任务最多搬多少件（批次 1 · B2） */
@@ -162,6 +171,7 @@ public final class Tasks {
     public static String kindName(int kind) {
         return switch (kind) {
             case TIDY -> "整理仓库";
+            case FETCH -> "暂存箱入仓";
             default -> "执行任务";
         };
     }
@@ -174,6 +184,7 @@ public final class Tasks {
         String t = s.trim().toLowerCase(Locale.ROOT);
         return switch (t) {
             case "tidy", "sort", "整理", "整理仓库" -> TIDY;
+            case "fetch", "暂存", "暂存入仓", "取货入仓" -> FETCH;
             default -> null;
         };
     }
@@ -226,10 +237,17 @@ public final class Tasks {
         /** 现在开着盖子的那只箱子（换箱子 / 收工时要把它盖上，免得箱盖一直敞着） */
         ServerLevel lidLevel;
         BlockPos lidPos;
+        /**
+         * 暂存箱入仓（{@link #FETCH}）：来源箱的维度与坐标。
+         *
+         * <p>这只箱子在仓库范围外、也不在仓库索引里，所以坐标随任务一起带着走；
+         * 整理任务（{@link #TIDY}）这两个字段为 null。
+         */
+        final String fetchDim;
+        final BlockPos fetchPos;
 
         Job(int kind, String region) {
-            this.kind = kind;
-            this.region = region == null ? "" : region;
+            this(kind, region, 0, 1, null, null);
         }
 
         /**
@@ -239,9 +257,21 @@ public final class Tasks {
          * @param parts 一共几片；1 = 一个人干整仓（老行为）
          */
         Job(int kind, String region, int part, int parts) {
-            this(kind, region);
+            this(kind, region, part, parts, null, null);
+        }
+
+        /** 暂存箱入仓：带上来源箱坐标（{@link #FETCH} 专用） */
+        Job(int kind, String region, String fetchDim, BlockPos fetchPos) {
+            this(kind, region, 0, 1, fetchDim, fetchPos);
+        }
+
+        Job(int kind, String region, int part, int parts, String fetchDim, BlockPos fetchPos) {
+            this.kind = kind;
+            this.region = region == null ? "" : region;
             this.parts = Math.max(1, parts);
             this.part = Math.floorMod(part, this.parts);
+            this.fetchDim = fetchDim;
+            this.fetchPos = fetchPos == null ? null : fetchPos.immutable();
         }
 
         void touch(String dimension, BlockPos pos) {
@@ -328,13 +358,34 @@ public final class Tasks {
      * @return null = 开工了；否则是要给玩家看的原因
      */
     public static String start(MinecraftServer server, String botName, int kind, String region, int part, int parts) {
+        return start(server, botName, kind, region, part, parts, null, null);
+    }
+
+    /**
+     * 让假人去把一只**仓库范围外**的暂存箱整理进 {@code region}（1.3.0 · issue #8 新增③）。
+     *
+     * <p>前置条件：箱子开了「暂存」标签、不在任何仓库范围内、所在区块已加载；假人必须值守
+     * {@code region}。搬运逻辑复用整理（暂存箱只出不进），所以不会在箱内来回压实。
+     *
+     * @return null = 开工了；否则是要给玩家看的原因
+     */
+    public static String startFetch(MinecraftServer server, String botName, String region,
+                                    String dimension, BlockPos pos) {
+        return start(server, botName, FETCH, region, 0, 1, dimension, pos);
+    }
+
+    private static String start(MinecraftServer server, String botName, int kind, String region,
+                                int part, int parts, String fetchDim, BlockPos fetchPos) {
         if (server == null || botName == null || botName.isEmpty()) {
             return "名册中没有该搬运工。";
         }
-        if (kind != TIDY) {
+        if (kind == SWEEP) {
             // （优化4）清扫已下线：命令层旧的 porter sweep / bot sweep 节点还会传这个类型过来，
             // 这里安全地拒绝，绝不建出一个没人会执行的任务（也不抛异常）。
             return "清扫功能已移除：本模组不再自动拾取仓库范围内的掉落物。";
+        }
+        if (kind != TIDY && kind != FETCH) {
+            return "不支持的任务类型。";
         }
         if (Porter.busyWithOrder(botName)) {
             return botName + " 正在配送订单，请等待配送完成后再派发任务。";
@@ -365,7 +416,15 @@ public final class Tasks {
             return botName + " 值守的是仓库「" + assigned + "」，只能在「" + assigned + "」内执行任务。";
         }
         r = assigned;
-        Job job = new Job(kind, r, part, parts);
+        if (kind == FETCH) {
+            String why = checkFetchSource(server, r, fetchDim, fetchPos);
+            if (why != null) {
+                return why;
+            }
+        }
+        Job job = kind == FETCH
+                ? new Job(kind, r, fetchDim, fetchPos)
+                : new Job(kind, r, part, parts);
         JOBS.put(botName, job);
         if (job.parts > 1) {
             WarehouseMod.LOGGER.info("[warehouse-keeper] 搬运工 {} 开始{}（值守仓库：{}，第 {}/{} 片）",
@@ -377,8 +436,40 @@ public final class Tasks {
         return null;
     }
 
-    public static boolean cancel(String botName) {
-        Job j = JOBS.remove(botName);
+    /**
+     * 暂存箱入仓的前置检查（1.3.0 · issue #8 新增③）。
+     *
+     * <p>这只箱子不在仓库索引里，所以所有条件都必须现查：维度、区块是否加载、是否真的不在
+     * 任何仓库范围内（否则玩家该用普通整理）、是否开了「暂存」标签、以及是不是一个容器。
+     *
+     * @return null = 可以开工；否则是要给玩家看的原因
+     */
+    private static String checkFetchSource(MinecraftServer server, String region, String dim, BlockPos pos) {
+        if (dim == null || pos == null) {
+            return "未指定暂存箱的位置。";
+        }
+        ServerLevel level = Scanner.levelOf(server, dim);
+        if (level == null) {
+            return "暂存箱所在的维度不存在。";
+        }
+        if (!level.isLoaded(pos)) {
+            return "暂存箱所在的区块还没有加载，请先靠近它再试。";
+        }
+        for (Region r : RegionStore.REGIONS.values()) {
+            if (Scanner.dimensionOf(r).equals(dim) && r.contains(pos)) {
+                return "这只箱子已经在仓库「" + r.name + "」的范围内，请直接使用整理功能。";
+            }
+        }
+        if (!(level.getBlockEntity(pos) instanceof Container)) {
+            return "这个位置不是容器，无法整理。";
+        }
+        if (!ContainerTags.isStaging(WarehouseIndex.key(dim, pos))) {
+            return "这只箱子还没有开启「暂存」标签，请先在标签栏里打开「暂存」。";
+        }
+        return null;
+    }
+
+    public static boolean cancel(String botName) {        Job j = JOBS.remove(botName);
         releaseClaims(botName);
         if (j != null) {
             // 取消也必须收尾（批次 1 · A1-c）：/warehouse bot stop 之后不能把已经捡到的物品留在假人身上，
@@ -505,11 +596,14 @@ public final class Tasks {
             return;
         }
         try {
-            if (j.kind != TIDY) {
-                // 理论上到不了这里（start 已经拒绝非 TIDY）；防御性收尾，别让任务永远卡在 JOBS 里
+            if (j.kind != TIDY && j.kind != FETCH) {
+                // 理论上到不了这里（start 已经拒绝别的类型）；防御性收尾，别让任务永远卡在 JOBS 里
                 finish(server, botName, j, "（该任务类型已下线）");
                 return;
             }
+            // 1.3.0 · issue #8 新增③：FETCH 和 TIDY 共用同一条 tick 主干（换箱、开盖、搬一件），
+            // 差别只在 findTidyMove 里「从哪只箱子开始规划」——之前这里只放行 TIDY，
+            // 暂存箱入仓刚派下去就被当成「已下线」收尾，所以按钮看起来形同虚设。
             tidyTick(server, botName, j);
         } catch (Throwable t) {
             WarehouseMod.LOGGER.warn("[warehouse-keeper] 搬运工 {} 执行任务出错: {}", botName, t.toString());
@@ -819,6 +913,29 @@ public final class Tasks {
     // ------------------------------------------------------------------
     // 整理仓库
 
+    /** 暂存箱入仓「一步都没走」时给玩家的原因（区分「箱子是空的」与「仓库没地方放」）。 */
+    private static String fetchEmptyNote(MinecraftServer server, Job j) {
+        ServerLevel src = Scanner.levelOf(server, j.fetchDim);
+        if (src == null) {
+            return "（暂存箱所在维度不存在）";
+        }
+        Scanner.SlotMap map = Scanner.mapOf(src, j.fetchPos);
+        if (map == null || map.size() <= 0) {
+            return "（读不到暂存箱里的物品）";
+        }
+        for (int i = 0; i < map.size(); i++) {
+            Scanner.Slot open = map.at(i);
+            if (open == null) {
+                continue;
+            }
+            ItemStack stack = open.container().getItem(open.index());
+            if (stack != null && !stack.isEmpty()) {
+                return "（目标仓库里没有能放下这些物品的箱子）";
+            }
+        }
+        return "（暂存箱是空的）";
+    }
+
     private static void tidyTick(MinecraftServer server, String botName, Job j) {
         // 表演节奏（玩家反馈「假人都不动就整理好了」）：搬一件之间隔 tidyTicksPerMove 刻，
         // 每一刻最多真的搬一件，于是玩家能看见它换箱子、掀盖、挥手、把货挪走。
@@ -826,6 +943,22 @@ public final class Tasks {
         int tick = server.getTickCount();
         if (tick < j.nextMoveTick) {
             return;
+        }
+        // 暂存箱入仓：来源箱在区域外，假人待命时那块区块没加载 —— Scanner.mapOf 读不到内容，
+        // planIn 会返回 null，任务立刻「0 秒完成」。所以先把它送到箱子旁边，区块加载了再算。
+        if (j.kind == FETCH && j.fetchPos != null) {
+            ServerLevel src = Scanner.levelOf(server, j.fetchDim);
+            if (src == null) {
+                j.dirty = false;
+                finish(server, botName, j, "（暂存箱所在维度不存在）");
+                return;
+            }
+            if (!src.isLoaded(j.fetchPos)) {
+                double[] spot = Body.chestSpot(src, j.fetchPos);
+                Body.moveTo(server, botName, src, spot[0], spot[1], spot[2]);
+                j.nextMoveTick = tick + 20;
+                return;
+            }
         }
         if (j.steps >= JOB_MOVES) {
             j.limited = true;
@@ -839,6 +972,10 @@ public final class Tasks {
         }
         Move m = findTidyMove(server, botName, j);
         if (m == null) {
+            if (j.kind == FETCH) {
+                finish(server, botName, j, fetchEmptyNote(server, j));
+                return;
+            }
             finish(server, botName, j, "");
             return;
         }
@@ -914,6 +1051,11 @@ public final class Tasks {
      * <p>批次 1 · R14：换箱子时先看{@link #CLAIMS 认领表}，别的假人正在整理的箱子直接跳过。
      */
     private static Move findTidyMove(MinecraftServer server, String botName, Job j) {
+        if (j.kind == FETCH) {
+            // 暂存箱入仓：来源只有任务自带的那一只箱子，不动仓库索引、也不参与多假人分片。
+            // 箱内合并/排序会被 planIn 的「暂存箱只出不进」跳过，这里只会拿到「搬进目标仓库」的步子。
+            return planIn(server, j, new ContainerRecord(j.fetchDim, j.fetchPos, "", 0));
+        }
         if (j.focus != null) {
             Move m = planIn(server, j, WarehouseMod.INDEX.containers.get(j.focus));
             if (m != null) {

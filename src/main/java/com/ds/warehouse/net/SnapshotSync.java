@@ -317,7 +317,8 @@ public final class SnapshotSync {
             sb.append(r.name).append(':')
                     .append(r.from[0]).append(',').append(r.from[1]).append(',').append(r.from[2]).append('-')
                     .append(r.to[0]).append(',').append(r.to[1]).append(',').append(r.to[2])
-                    .append(r.fullHeight ? 'F' : 'f').append(r.dimension).append('|');
+                    .append(r.fullHeight ? 'F' : 'f').append(r.dimension)
+                    .append('#').append(String.format("%06X", r.color & 0xFFFFFF)).append('|');
         }
         return sb.toString();
     }
@@ -416,6 +417,7 @@ public final class SnapshotSync {
             rd.name = r.name;
             rd.dimension = r.dimension;
             rd.fullHeight = r.fullHeight;
+        rd.color = r.color;
             rd.from = new int[]{r.from[0], r.from[1], r.from[2]};
             rd.to = new int[]{r.to[0], r.to[1], r.to[2]};
 
@@ -775,6 +777,8 @@ public final class SnapshotSync {
         String name;
         String dimension;
         boolean fullHeight;
+        /** 代表颜色（0xRRGGBB）；老服务端不带这个字段时客户端按白色处理 */
+        int color = 0xFFFFFF;
         int[] from = new int[]{0, 0, 0};
         int[] to = new int[]{0, 0, 0};
         long totalItems;

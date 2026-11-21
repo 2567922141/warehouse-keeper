@@ -104,6 +104,9 @@ public class WarehouseClient implements ClientModInitializer {
 
         // 箱子标签栏（批次 3）：开着箱子时在旁边贴一列按钮，点一下＝替玩家敲一条 /warehouse tag …
         ContainerTagBar.register();
+
+        // 仓库边界：issue #8 优化② 用 gizmo 的半透明彩色长方体替代原来的发光粒子
+        RegionGizmos.register();
     }
 
     /**

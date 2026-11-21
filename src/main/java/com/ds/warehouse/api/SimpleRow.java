@@ -10,9 +10,9 @@ import java.util.function.IntConsumer;
  * <p>附属模组只想给出一组行时直接用这里的静态工厂即可，不必自己写实现类：
  * <pre>{@code
  * return List.of(
- *         SimpleRow.cycle("主模型", currentModelName(), "点一下换下一个；改完要「保存并应用」", this::nextModel),
+ *         SimpleRow.cycle("主模型", currentModelName(), "点击切换到下一个；修改后需「保存并应用」", this::nextModel),
  *         SimpleRow.toggle("副模型对照", compareOn, "两套模型同时识别，用来对比结果", this::toggleCompare),
- *         SimpleRow.action("下载模型", installed ? "删除" : "下载", "点一下下载；已装好时点一下删除（会再确认一次）", this::downloadOrDelete),
+ *         SimpleRow.action("下载模型", installed ? "删除" : "下载", "点击下载；已安装时点击删除（会再确认一次）", this::downloadOrDelete),
  *         SimpleRow.info("模型目录", dir.toString(), "下载的模型都放在这里")
  * );
  * }</pre>

@@ -92,6 +92,8 @@ public final class ClientSnapshot {
         public String name = "";
         public String dimension = "minecraft:overworld";
         public boolean fullHeight = true;
+        /** 代表颜色（0xRRGGBB，默认白色） */
+        public int color = 0xFFFFFF;
         public int[] from = new int[]{0, 0, 0};
         public int[] to = new int[]{0, 0, 0};
         public long totalItems;

@@ -22,6 +22,14 @@ public class Region {
      */
     public boolean fullHeight = true;
 
+    /**
+     * 仓库的代表颜色（0xRRGGBB，默认白色）。
+     *
+     * <p>只影响「边界怎么画」与面板上的色块，不参与任何库存/区域判定；
+     * 老配置文件里没有这个字段 → Gson 保留默认值 0xFFFFFF（白色）。
+     */
+    public int color = 0xFFFFFF;
+
     /** 给 Gson 用的空构造 */
     public Region() {
     }

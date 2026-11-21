@@ -50,7 +50,7 @@ Warehouse Keeper 是面向 Minecraft 26.3 和 Minecraft 26.2 的 Fabric 模组�
 
 | 环境 | 版本 |
 | --- | --- |
-| 系统 | windows 11 x64 26H2 Workstation Pro（专业工作站版） |
+| 系统 System | windows 11 x64 26H2 Workstation Pro（专业工作站版） |
 | Minecraft | 26.3 |
 | Fabric Loader | 0.19.5（0.19.3 或更高） |
 | Fabric API | 0.161.0+26.3（或兼容版本） |
